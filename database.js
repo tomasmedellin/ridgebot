@@ -29,13 +29,45 @@ async function initializeDatabase() {
                 channel_id VARCHAR(32) NOT NULL,
                 case_code VARCHAR(50) NOT NULL,
                 judge_id VARCHAR(32) NOT NULL,
-                clerk_id VARCHAR(32) NOT NULL,
-                plaintiff_id VARCHAR(32) NOT NULL,
-                defendant_id VARCHAR(32) NOT NULL,
+                clerk_id VARCHAR(32),
+                plaintiff_ids TEXT NOT NULL,
+                defendant_ids TEXT NOT NULL,
                 case_link TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status VARCHAR(20) DEFAULT 'active'
             )
+        `);
+        
+        // Add migration for existing tables
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                -- Check if the old columns exist and migrate
+                IF EXISTS (SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='cases' AND column_name='plaintiff_id') 
+                THEN
+                    -- Add new columns if they don't exist
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                        WHERE table_name='cases' AND column_name='plaintiff_ids') 
+                    THEN
+                        ALTER TABLE cases ADD COLUMN plaintiff_ids TEXT;
+                        ALTER TABLE cases ADD COLUMN defendant_ids TEXT;
+                    END IF;
+                    
+                    -- Migrate data from old columns to new
+                    UPDATE cases 
+                    SET plaintiff_ids = plaintiff_id,
+                        defendant_ids = defendant_id
+                    WHERE plaintiff_ids IS NULL;
+                    
+                    -- Make clerk_id nullable
+                    ALTER TABLE cases ALTER COLUMN clerk_id DROP NOT NULL;
+                    
+                    -- Drop old columns
+                    ALTER TABLE cases DROP COLUMN IF EXISTS plaintiff_id;
+                    ALTER TABLE cases DROP COLUMN IF EXISTS defendant_id;
+                END IF;
+            END $$;
         `);
         
         await pool.query(`
@@ -176,6 +208,26 @@ async function initializeDatabase() {
             )
         `);
         
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS dej_orders (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                channel_id VARCHAR(32) NOT NULL,
+                case_code VARCHAR(50) NOT NULL,
+                target_user_id VARCHAR(32) NOT NULL,
+                issued_by VARCHAR(32) NOT NULL,
+                duration VARCHAR(50) NOT NULL,
+                conditions TEXT NOT NULL,
+                suspended_sentence TEXT NOT NULL,
+                order_link TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_checkin TIMESTAMP,
+                next_checkin TIMESTAMP NOT NULL,
+                checkin_count INTEGER DEFAULT 0,
+                status VARCHAR(20) DEFAULT 'active'
+            )
+        `);
+        
         console.log('Database initialized successfully');
     } catch (error) {
         console.error('Error initializing database:', error);
@@ -212,13 +264,13 @@ async function markAsNotified(id) {
     await pool.query(query, [id]);
 }
 
-async function createCase(guildId, channelId, caseCode, judgeId, clerkId, plaintiffId, defendantId, caseLink) {
+async function createCase(guildId, channelId, caseCode, judgeId, clerkId, plaintiffIds, defendantIds, caseLink) {
     const query = `
-        INSERT INTO cases (guild_id, channel_id, case_code, judge_id, clerk_id, plaintiff_id, defendant_id, case_link)
+        INSERT INTO cases (guild_id, channel_id, case_code, judge_id, clerk_id, plaintiff_ids, defendant_ids, case_link)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING *
     `;
-    const values = [guildId, channelId, caseCode, judgeId, clerkId, plaintiffId, defendantId, caseLink];
+    const values = [guildId, channelId, caseCode, judgeId, clerkId, plaintiffIds, defendantIds, caseLink];
     const result = await pool.query(query, values);
     return result.rows[0];
 }
@@ -391,6 +443,41 @@ async function createStaffInvoice(guildId, channelId, caseId, userId, roleType, 
     return result.rows[0];
 }
 
+async function createDEJOrder(guildId, channelId, caseCode, targetUserId, issuedBy, duration, conditions, suspendedSentence, orderLink, nextCheckin) {
+    const query = `
+        INSERT INTO dej_orders 
+        (guild_id, channel_id, case_code, target_user_id, issued_by, duration, conditions, suspended_sentence, order_link, next_checkin)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *
+    `;
+    const values = [guildId, channelId, caseCode, targetUserId, issuedBy, duration, conditions, suspendedSentence, orderLink, nextCheckin];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
+async function getDEJCheckinsDue() {
+    const query = `
+        SELECT * FROM dej_orders 
+        WHERE next_checkin <= CURRENT_TIMESTAMP 
+        AND status = 'active'
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+}
+
+async function updateDEJCheckin(id) {
+    const query = `
+        UPDATE dej_orders 
+        SET last_checkin = CURRENT_TIMESTAMP,
+            next_checkin = CURRENT_TIMESTAMP + INTERVAL '5 days',
+            checkin_count = checkin_count + 1
+        WHERE id = $1
+        RETURNING *
+    `;
+    const result = await pool.query(query, [id]);
+    return result.rows[0];
+}
+
 module.exports = {
     initializeDatabase,
     createDiscoveryDeadline,
@@ -412,5 +499,8 @@ module.exports = {
     getExpiredERPOOrders,
     markERPOSurrendered,
     createFirearmsRelinquishment,
-    createStaffInvoice
+    createStaffInvoice,
+    createDEJOrder,
+    getDEJCheckinsDue,
+    updateDEJCheckin
 };

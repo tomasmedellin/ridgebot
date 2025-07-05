@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 
@@ -40,22 +40,22 @@ client.once(Events.ClientReady, async readyClient => {
             option.setName('judge')
                 .setDescription('The judge assigned to the case')
                 .setRequired(true))
-        .addUserOption(option =>
-            option.setName('clerk')
-                .setDescription('The assigned clerk')
+        .addStringOption(option =>
+            option.setName('plaintiffs')
+                .setDescription('Plaintiff(s) - mention multiple users separated by spaces')
                 .setRequired(true))
-        .addUserOption(option =>
-            option.setName('plaintiff')
-                .setDescription('The plaintiff')
-                .setRequired(true))
-        .addUserOption(option =>
-            option.setName('defendant')
-                .setDescription('The defendant')
+        .addStringOption(option =>
+            option.setName('defendants')
+                .setDescription('Defendant(s) - mention multiple users separated by spaces')
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('case_link')
                 .setDescription('Link to the case details')
-                .setRequired(true));
+                .setRequired(true))
+        .addUserOption(option =>
+            option.setName('clerk')
+                .setDescription('The assigned clerk (optional)')
+                .setRequired(false));
     
     const transcriptCommand = new SlashCommandBuilder()
         .setName('transcript')
@@ -221,6 +221,62 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('Receipt URL for reimbursements (Public Defender only)')
                 .setRequired(false));
     
+    const minuteOrderCommand = new SlashCommandBuilder()
+        .setName('minuteorder')
+        .setDescription('Issue a minute order')
+        .addUserOption(option =>
+            option.setName('party')
+                .setDescription('The party this order is directed at')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('order_text')
+                .setDescription('The text of the order')
+                .setRequired(true));
+    
+    const dejCommand = new SlashCommandBuilder()
+        .setName('dej')
+        .setDescription('Issue a Deferred Entry of Judgment order')
+        .addUserOption(option =>
+            option.setName('party')
+                .setDescription('The party this DEJ is directed at')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('duration')
+                .setDescription('Duration of the DEJ (e.g., "6 months", "1 year")')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('conditions')
+                .setDescription('Conditions of probation (separate multiple with semicolons)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('suspended_sentence')
+                .setDescription('The suspended sentence details')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('order_link')
+                .setDescription('Google Drive link to courtesy copy of order')
+                .setRequired(true));
+    
+    const noaCommand = new SlashCommandBuilder()
+        .setName('noa')
+        .setDescription('File a Notice of Appearance')
+        .addChannelOption(option =>
+            option.setName('case_channel')
+                .setDescription('The case channel')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('appearing_for')
+                .setDescription('Appearing on behalf of')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Plaintiff', value: 'plaintiff' },
+                    { name: 'Defendant', value: 'defendant' }
+                ))
+        .addStringOption(option =>
+            option.setName('bar_number')
+                .setDescription('Your Ridgeway Bar Number')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -239,7 +295,10 @@ client.once(Events.ClientReady, async readyClient => {
             financialDisclosureCommand.toJSON(),
             erpoCommand.toJSON(),
             firearmsRelinquishmentCommand.toJSON(),
-            staffInvoiceCommand.toJSON()
+            staffInvoiceCommand.toJSON(),
+            minuteOrderCommand.toJSON(),
+            dejCommand.toJSON(),
+            noaCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -249,6 +308,7 @@ client.once(Events.ClientReady, async readyClient => {
     setInterval(checkExpiredDeadlines, 60000); // Check every minute
     setInterval(checkExpiredAppealDeadlines, 60000); // Check every minute for appeal deadlines
     setInterval(checkExpiredERPODeadlines, 60000); // Check every minute for ERPO deadlines
+    setInterval(checkDEJCheckins, 60000); // Check every minute for DEJ check-ins
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -258,6 +318,10 @@ client.on(Events.InteractionCreate, async interaction => {
     
     // Special handling for case party commands - check if user can send messages in channel
     const casePartyCommands = ['appealnotice', 'certiorari', 'financialdisclosure', 'firearmsrelinquishment'];
+    
+    // Attorney commands that have their own permission checks
+    const attorneyCommands = ['noa'];
+    
     if (casePartyCommands.includes(interaction.commandName)) {
         // If user has the allowed role, they can always use these commands
         if (!interaction.member.roles.cache.has(ALLOWED_ROLE_ID)) {
@@ -277,8 +341,8 @@ client.on(Events.InteractionCreate, async interaction => {
             }
             // If they can send messages, they're a case party - let them through
         }
-    } else {
-        // For all other commands, require the allowed role
+    } else if (!attorneyCommands.includes(interaction.commandName)) {
+        // For all other commands (except attorney commands), require the allowed role
         if (!interaction.member.roles.cache.has(ALLOWED_ROLE_ID)) {
             await interaction.reply({ 
                 content: 'You do not have permission to use this bot.', 
@@ -287,6 +351,7 @@ client.on(Events.InteractionCreate, async interaction => {
             return;
         }
     }
+    // Attorney commands will handle their own permission checks
     
     if (interaction.commandName === 'discovery') {
         const caseType = interaction.options.getString('case_type');
@@ -330,55 +395,117 @@ client.on(Events.InteractionCreate, async interaction => {
         
         const caseCode = interaction.options.getString('case_code');
         const judge = interaction.options.getUser('judge');
-        const clerk = interaction.options.getUser('clerk');
-        const plaintiff = interaction.options.getUser('plaintiff');
-        const defendant = interaction.options.getUser('defendant');
+        const clerk = interaction.options.getUser('clerk'); // Optional
+        const plaintiffsString = interaction.options.getString('plaintiffs');
+        const defendantsString = interaction.options.getString('defendants');
         const caseLink = interaction.options.getString('case_link');
         
         try {
+            // Parse plaintiff and defendant mentions
+            const plaintiffMatches = plaintiffsString.match(/<@!?(\d+)>/g) || [];
+            const defendantMatches = defendantsString.match(/<@!?(\d+)>/g) || [];
+            
+            if (plaintiffMatches.length === 0) {
+                await interaction.editReply({
+                    content: 'Please mention at least one plaintiff using @mention.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            if (defendantMatches.length === 0) {
+                await interaction.editReply({
+                    content: 'Please mention at least one defendant using @mention.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Extract user IDs from mentions
+            const plaintiffIds = plaintiffMatches.map(match => match.replace(/<@!?|>/g, ''));
+            const defendantIds = defendantMatches.map(match => match.replace(/<@!?|>/g, ''));
+            
+            // Start building permission overwrites
+            const permissionOverwrites = [
+                {
+                    id: interaction.guild.id,
+                    allow: [PermissionFlagsBits.ViewChannel],
+                    deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.AddReactions]
+                },
+                {
+                    id: interaction.client.user.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]
+                },
+                {
+                    id: judge.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                }
+            ];
+            
+            // Add clerk permissions if clerk is specified
+            if (clerk) {
+                permissionOverwrites.push({
+                    id: clerk.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                });
+            }
+            
+            // Add permissions for all plaintiffs
+            for (const plaintiffId of plaintiffIds) {
+                permissionOverwrites.push({
+                    id: plaintiffId,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                });
+            }
+            
+            // Add permissions for all defendants
+            for (const defendantId of defendantIds) {
+                permissionOverwrites.push({
+                    id: defendantId,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                });
+            }
+            
             // Create the channel with proper permissions
             const channel = await interaction.guild.channels.create({
                 name: caseCode.toLowerCase().replace(/\s+/g, '-'),
                 type: ChannelType.GuildText,
-                permissionOverwrites: [
-                    {
-                        id: interaction.guild.id,
-                        allow: [PermissionFlagsBits.ViewChannel],
-                        deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.AddReactions]
-                    },
-                    {
-                        id: interaction.client.user.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]
-                    },
-                    {
-                        id: judge.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-                    },
-                    {
-                        id: clerk.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-                    },
-                    {
-                        id: plaintiff.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-                    },
-                    {
-                        id: defendant.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-                    }
-                ]
+                permissionOverwrites: permissionOverwrites
             });
             
-            // Save case to database
+            // Save case to database (store IDs as comma-separated strings)
             await createCase(
                 interaction.guildId,
                 channel.id,
                 caseCode,
                 judge.id,
-                clerk.id,
-                plaintiff.id,
-                defendant.id,
+                clerk ? clerk.id : null,
+                plaintiffIds.join(','),
+                defendantIds.join(','),
                 caseLink
+            );
+            
+            // Create plaintiffs and defendants display strings
+            const plaintiffsDisplay = plaintiffIds.map(id => `<@${id}>`).join(', ');
+            const defendantsDisplay = defendantIds.map(id => `<@${id}>`).join(', ');
+            
+            // Build fields for the embed
+            const embedFields = [
+                { name: 'Judge', value: `<@${judge.id}>`, inline: true }
+            ];
+            
+            if (clerk) {
+                embedFields.push({ name: 'Clerk', value: `<@${clerk.id}>`, inline: true });
+                embedFields.push({ name: '\u200B', value: '\u200B', inline: true });
+            } else {
+                embedFields.push({ name: 'Clerk', value: 'Not assigned', inline: true });
+                embedFields.push({ name: '\u200B', value: '\u200B', inline: true });
+            }
+            
+            embedFields.push(
+                { name: plaintiffIds.length > 1 ? 'Plaintiffs' : 'Plaintiff', value: plaintiffsDisplay, inline: true },
+                { name: defendantIds.length > 1 ? 'Defendants' : 'Defendant', value: defendantsDisplay, inline: true },
+                { name: '\u200B', value: '\u200B', inline: true }
             );
             
             // Create case information embed
@@ -386,14 +513,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 .setColor(0x0099FF)
                 .setTitle(`Case: ${caseCode}`)
                 .setDescription('Discord Courtroom has been initialized\n\n⚖️ **NOTICE:** This channel is fully on the record and reflective of the actual court transcript. Please follow chamber rules.')
-                .addFields(
-                    { name: 'Judge', value: `<@${judge.id}>`, inline: true },
-                    { name: 'Clerk', value: `<@${clerk.id}>`, inline: true },
-                    { name: '\u200B', value: '\u200B', inline: true },
-                    { name: 'Plaintiff', value: `<@${plaintiff.id}>`, inline: true },
-                    { name: 'Defendant', value: `<@${defendant.id}>`, inline: true },
-                    { name: '\u200B', value: '\u200B', inline: true }
-                )
+                .addFields(embedFields)
                 .setTimestamp()
                 .setFooter({ text: `Initialized by ${interaction.user.username}` });
             
@@ -1623,7 +1743,7 @@ client.on(Events.InteractionCreate, async interaction => {
             await fs.unlink(filepath);
             
             // Get Clerk of Superior Court role ID (you may need to update this)
-            const CLERK_OF_SUPERIOR_COURT_ID = '1391058529510494369'; // Update this with actual channel ID
+            const CLERK_OF_SUPERIOR_COURT_ID = '1391096993270599770'; // Update this with actual channel ID
             
             try {
                 const clerkChannel = await client.channels.fetch(CLERK_OF_SUPERIOR_COURT_ID);
@@ -1652,6 +1772,356 @@ client.on(Events.InteractionCreate, async interaction => {
             await interaction.editReply({
                 content: 'An error occurred while processing your invoice.',
                 flags: 64
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'minuteorder') {
+        // Check if user has the required role
+        const ALLOWED_ROLE_ID = '1391041650586943588';
+        
+        if (!interaction.member.roles.cache.has(ALLOWED_ROLE_ID)) {
+            await interaction.reply({
+                content: 'You do not have permission to use this command.',
+                flags: 64
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        const targetParty = interaction.options.getUser('party');
+        const orderText = interaction.options.getString('order_text');
+        const channel = interaction.channel;
+        
+        try {
+            // Get case information to extract case code
+            const caseInfo = await getCaseByChannel(interaction.guildId, channel.id);
+            
+            if (!caseInfo) {
+                await interaction.editReply({
+                    content: 'This command can only be used in an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Generate minute order ID
+            const orderId = `MO-${Date.now()}`;
+            
+            // Generate PDF
+            const pdfBuffer = await generateMinuteOrderPDF(
+                caseInfo.case_code,
+                orderId,
+                targetParty,
+                orderText,
+                interaction.user,
+                new Date()
+            );
+            
+            // Create attachment
+            const filename = `minute-order-${caseInfo.case_code}-${Date.now()}.pdf`;
+            const attachment = new AttachmentBuilder(pdfBuffer, { name: filename });
+            
+            // Create minute order embed
+            const minuteOrderEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('⚖️ MINUTE ORDER')
+                .setDescription(`A minute order has been issued by the court.`)
+                .addFields(
+                    { name: 'Directed to', value: `${targetParty}`, inline: true },
+                    { name: 'Issued By', value: `${interaction.user}`, inline: true },
+                    { name: 'Case', value: caseInfo.case_code, inline: true },
+                    { name: 'Order', value: orderText, inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'This is an official court order' });
+            
+            // Send the response with PDF
+            await interaction.editReply({
+                content: `${targetParty}`,
+                embeds: [minuteOrderEmbed],
+                files: [attachment]
+            });
+            
+            // Send follow-up notice
+            await channel.send({
+                content: `⚖️ **COURT ORDER** ⚖️\n${targetParty}, you have been served with a minute order. Please review the order above immediately.`
+            });
+            
+        } catch (error) {
+            console.error('Error issuing minute order:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while issuing the minute order.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'dej') {
+        // Check if user has the allowed role
+        const DEJ_ALLOWED_ROLE = '1391041650586943588';
+        if (!interaction.member.roles.cache.has(DEJ_ALLOWED_ROLE)) {
+            await interaction.reply({
+                content: 'You do not have permission to issue DEJ orders.',
+                flags: 64
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        const targetParty = interaction.options.getUser('party');
+        const duration = interaction.options.getString('duration');
+        const conditions = interaction.options.getString('conditions');
+        const suspendedSentence = interaction.options.getString('suspended_sentence');
+        const orderLink = interaction.options.getString('order_link');
+        const channel = interaction.channel;
+        
+        try {
+            // Get case information
+            const caseInfo = await getCaseByChannel(interaction.guildId, channel.id);
+            
+            if (!caseInfo) {
+                await interaction.editReply({
+                    content: 'This command can only be used in an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Validate Google Drive link
+            if (!orderLink.includes('drive.google.com') && !orderLink.includes('docs.google.com')) {
+                await interaction.editReply({
+                    content: 'Please provide a valid Google Drive link for the order.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Calculate first check-in date (5 days from now)
+            const nextCheckin = new Date();
+            nextCheckin.setDate(nextCheckin.getDate() + 5);
+            
+            // Create DEJ order in database
+            const dejOrder = await createDEJOrder(
+                interaction.guildId,
+                channel.id,
+                caseInfo.case_code,
+                targetParty.id,
+                interaction.user.id,
+                duration,
+                conditions,
+                suspendedSentence,
+                orderLink,
+                nextCheckin
+            );
+            
+            // Move channel to probation category
+            const PROBATION_CATEGORY_ID = '1391073873436475492';
+            await channel.setParent(PROBATION_CATEGORY_ID);
+            
+            // Add probation role to channel permissions
+            const PROBATION_ROLE_ID = '1391100951435415643';
+            await channel.permissionOverwrites.create(PROBATION_ROLE_ID, {
+                ViewChannel: true,
+                SendMessages: true
+            });
+            
+            // Parse conditions into array
+            const conditionsList = conditions.split(';').map(c => c.trim()).filter(c => c);
+            
+            // Create DEJ embed
+            const dejEmbed = new EmbedBuilder()
+                .setColor(0x9B59B6)
+                .setTitle('⚖️ DEFERRED ENTRY OF JUDGMENT')
+                .setDescription(`A Deferred Entry of Judgment has been ordered for ${targetParty}.`)
+                .addFields(
+                    { name: 'Subject', value: `${targetParty}`, inline: true },
+                    { name: 'Duration', value: duration, inline: true },
+                    { name: 'Case', value: caseInfo.case_code, inline: true },
+                    { name: 'Suspended Sentence', value: suspendedSentence, inline: false },
+                    { name: 'Conditions of Probation', value: conditionsList.map((c, i) => `${i + 1}. ${c}`).join('\n') || 'None specified', inline: false },
+                    { name: '📋 Check-in Requirements', value: `${targetParty} must check in with probation every **5 days**. First check-in due: **${nextCheckin.toLocaleDateString()}**`, inline: false },
+                    { name: 'Order Document', value: `[View Order](${orderLink})`, inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Failure to comply with probation terms may result in execution of suspended sentence' });
+            
+            // Send the response
+            await interaction.editReply({
+                content: `${targetParty}`,
+                embeds: [dejEmbed]
+            });
+            
+            // Post probation information
+            const probationInfoEmbed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('📋 PROBATION INFORMATION')
+                .setDescription(`This channel has been moved to the Probation category. The Probation Department now has access.`)
+                .addFields(
+                    { name: 'Probationer', value: `${targetParty}`, inline: true },
+                    { name: 'Probation Period', value: duration, inline: true },
+                    { name: 'Next Check-in', value: nextCheckin.toLocaleDateString(), inline: true },
+                    { name: 'Check-in Schedule', value: 'Every 5 days', inline: false },
+                    { name: 'Important Notice', value: `${targetParty} must report to this channel every 5 days. Failure to check in will be reported to the court.`, inline: false }
+                );
+            
+            await channel.send({ embeds: [probationInfoEmbed] });
+            
+            // Send notice to probationer
+            await channel.send({
+                content: `⚠️ **PROBATION NOTICE** ⚠️\n${targetParty}, you have been placed on probation with a Deferred Entry of Judgment. You MUST check in to this channel every 5 days starting ${nextCheckin.toLocaleDateString()}. Your check-in should include:\n\n1. Confirmation of compliance with all probation conditions\n2. Any issues or concerns\n3. Updates on progress\n\nFailure to check in will result in a violation report to the court.`
+            });
+            
+        } catch (error) {
+            console.error('Error issuing DEJ order:', error);
+            await interaction.editReply({
+                content: 'An error occurred while issuing the DEJ order.',
+                flags: 64
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'noa') {
+        // Check if user has the required role
+        const ATTORNEY_ROLE_ID = '1378582412698845264';
+        
+        // Debug logging
+        console.log('NOA Command - User roles:', Array.from(interaction.member.roles.cache.keys()));
+        console.log('NOA Command - Looking for role:', ATTORNEY_ROLE_ID);
+        console.log('NOA Command - Has role:', interaction.member.roles.cache.has(ATTORNEY_ROLE_ID));
+        
+        if (!interaction.member.roles.cache.has(ATTORNEY_ROLE_ID)) {
+            await interaction.reply({
+                content: 'You do not have permission to file a Notice of Appearance. Only licensed attorneys may use this command.',
+                flags: 64
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        const caseChannel = interaction.options.getChannel('case_channel');
+        const appearingFor = interaction.options.getString('appearing_for');
+        const barNumber = interaction.options.getString('bar_number');
+        
+        try {
+            // Get case information from the specified channel
+            const caseInfo = await getCaseByChannel(interaction.guildId, caseChannel.id);
+            
+            if (!caseInfo) {
+                await interaction.editReply({
+                    content: 'The specified channel is not an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Get plaintiff and defendant information
+            const plaintiffIds = caseInfo.plaintiff_ids ? caseInfo.plaintiff_ids.split(',') : [];
+            const defendantIds = caseInfo.defendant_ids ? caseInfo.defendant_ids.split(',') : [];
+            
+            // Get user objects for plaintiffs and defendants
+            const plaintiffs = [];
+            const defendants = [];
+            
+            for (const id of plaintiffIds) {
+                try {
+                    const user = await client.users.fetch(id.trim());
+                    if (user) plaintiffs.push(user);
+                } catch (e) {
+                    console.error(`Could not fetch plaintiff with ID ${id}:`, e);
+                }
+            }
+            
+            for (const id of defendantIds) {
+                try {
+                    const user = await client.users.fetch(id.trim());
+                    if (user) defendants.push(user);
+                } catch (e) {
+                    console.error(`Could not fetch defendant with ID ${id}:`, e);
+                }
+            }
+            
+            // Prepare names for the document
+            const plaintiffNames = plaintiffs.length > 0 
+                ? plaintiffs.map(u => u.username).join(', ')
+                : 'Unknown Plaintiff';
+            
+            const defendantNames = defendants.length > 0
+                ? defendants.map(u => u.username).join(', ')
+                : 'Unknown Defendant';
+            
+            // Generate NOA ID
+            const noaId = `NOA-${Date.now()}`;
+            
+            // Generate PDF
+            const pdfBuffer = await generateNOAPDF(
+                plaintiffNames,
+                defendantNames,
+                caseChannel.name,
+                interaction.user.username,
+                appearingFor,
+                barNumber,
+                new Date()
+            );
+            
+            // Create attachment
+            const filename = `notice-of-appearance-${caseInfo.case_code}-${Date.now()}.pdf`;
+            const attachment = new AttachmentBuilder(pdfBuffer, { name: filename });
+            
+            // Add attorney to the case channel
+            await caseChannel.permissionOverwrites.edit(interaction.user.id, {
+                ViewChannel: true,
+                SendMessages: true
+            });
+            
+            // Create NOA embed
+            const noaEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('📋 NOTICE OF APPEARANCE')
+                .setDescription(`${interaction.user} has filed a Notice of Appearance.`)
+                .addFields(
+                    { name: 'Attorney', value: `${interaction.user}`, inline: true },
+                    { name: 'Appearing for', value: appearingFor.charAt(0).toUpperCase() + appearingFor.slice(1), inline: true },
+                    { name: 'Bar Number', value: barNumber, inline: true },
+                    { name: 'Case', value: caseInfo.case_code, inline: true },
+                    { name: 'Document ID', value: noaId, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'This attorney has been added to the case' });
+            
+            // Send to the interaction channel
+            await interaction.editReply({
+                content: `Notice of Appearance filed successfully. You have been added to ${caseChannel}.`,
+                embeds: [noaEmbed],
+                files: [attachment]
+            });
+            
+            // Also send to the case channel
+            const caseChannelEmbed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('⚖️ ATTORNEY APPEARANCE')
+                .setDescription(`A new attorney has entered an appearance in this case.`)
+                .addFields(
+                    { name: 'Attorney', value: `${interaction.user}`, inline: true },
+                    { name: 'Representing', value: appearingFor.charAt(0).toUpperCase() + appearingFor.slice(1), inline: true },
+                    { name: 'Bar Number', value: barNumber, inline: true }
+                )
+                .setTimestamp();
+            
+            await caseChannel.send({
+                content: `All parties please note: ${interaction.user} has entered an appearance as counsel for the ${appearingFor}.`,
+                embeds: [caseChannelEmbed],
+                files: [new AttachmentBuilder(pdfBuffer, { name: filename })]
+            });
+            
+        } catch (error) {
+            console.error('Error filing NOA:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while filing the Notice of Appearance.', 
+                flags: 64 
             });
         }
     }
@@ -2510,6 +2980,170 @@ async function checkExpiredERPODeadlines() {
     }
 }
 
+async function generateMinuteOrderPDF(caseCode, orderId, targetParty, orderText, issuedBy, date) {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({
+            size: 'LETTER',
+            margins: {
+                top: 72,
+                bottom: 72,
+                left: 72,
+                right: 72
+            }
+        });
+        
+        const chunks = [];
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        
+        // Header
+        doc.fontSize(12).text('SUPERIOR COURT OF RIDGEWAY', { align: 'center' });
+        doc.fontSize(10).text('County of Ridgeway', { align: 'center' });
+        doc.moveDown();
+        
+        // Title
+        doc.fontSize(16).font('Helvetica-Bold').text('MINUTE ORDER', { align: 'center' });
+        doc.moveDown();
+        
+        // Case Information
+        doc.fontSize(11).font('Helvetica');
+        doc.text(`Case Number: ${caseCode}`, { align: 'left' });
+        doc.text(`Date Issued: ${date.toLocaleString()}`, { align: 'left' });
+        doc.text(`Order ID: ${orderId}`, { align: 'left' });
+        doc.moveDown();
+        
+        // Parties
+        doc.font('Helvetica-Bold').text('PARTIES:', { underline: true });
+        doc.font('Helvetica');
+        doc.text(`Party Directed At: ${targetParty.username} (ID: ${targetParty.id})`);
+        doc.text(`Issued By: ${issuedBy.username} (ID: ${issuedBy.id})`);
+        doc.moveDown();
+        
+        // The Order
+        doc.font('Helvetica-Bold').fontSize(12).text('THE COURT HEREBY ORDERS:', { underline: true });
+        doc.font('Helvetica').fontSize(11);
+        doc.moveDown(0.5);
+        
+        // Order text - handle line breaks and formatting
+        const orderLines = orderText.split('\n');
+        orderLines.forEach(line => {
+            doc.text(line);
+        });
+        doc.moveDown();
+        
+        // Compliance Notice
+        doc.font('Helvetica-Bold').text('NOTICE:', { underline: true });
+        doc.font('Helvetica').text('The above-named party SHALL comply with this order immediately. Failure to comply may result in contempt of court proceedings.');
+        doc.moveDown(2);
+        
+        // Signature Lines
+        doc.text('IT IS SO ORDERED.', { align: 'center' });
+        doc.moveDown();
+        doc.text('_________________________________', { align: 'center' });
+        doc.text('Judicial Officer', { align: 'center' });
+        doc.moveDown();
+        doc.text(`Date: ${date.toLocaleDateString()}`, { align: 'center' });
+        doc.text(`Time: ${date.toLocaleTimeString()}`, { align: 'center' });
+        doc.moveDown(2);
+        
+        // Footer
+        doc.fontSize(9).text('This is an official court document. Any alteration or falsification is a criminal offense.', { align: 'center' });
+        doc.text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
+        
+        doc.end();
+    });
+}
+
+async function generateNOAPDF(plaintiffNames, defendantNames, channelName, attorneyName, appearingFor, barNumber, date) {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({
+            size: 'LETTER',
+            margins: {
+                top: 72,
+                bottom: 72,
+                left: 72,
+                right: 72
+            }
+        });
+        
+        const chunks = [];
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        
+        // Header
+        doc.fontSize(12).font('Helvetica-Bold').text('IN THE SUPERIOR COURT OF THE STATE OF RIDGEWAY', { align: 'center' });
+        doc.moveDown(2);
+        
+        // Left-aligned party section
+        doc.fontSize(11).font('Helvetica');
+        doc.text(plaintiffNames, 72, doc.y, { align: 'left' });
+        doc.moveDown(0.5);
+        doc.text('Plaintiff' + (plaintiffNames.includes(',') ? 's' : ''), { align: 'left', indent: 40 });
+        doc.moveDown();
+        
+        doc.text('v.', { align: 'left' });
+        doc.moveDown();
+        
+        doc.text(defendantNames, { align: 'left' });
+        doc.moveDown(0.5);
+        doc.text('Defendant' + (defendantNames.includes(',') ? 's' : ''), { align: 'left', indent: 40 });
+        
+        // Case number on the right
+        doc.fontSize(11).text(')', 300, 120);
+        doc.text(')', 300, 135);
+        doc.text(')', 300, 150);
+        doc.text(')', 300, 165);
+        doc.text(')', 300, 180);
+        doc.text(')', 300, 195);
+        doc.text(')', 300, 210);
+        doc.text(')', 300, 225);
+        doc.text(')', 300, 240);
+        doc.text(')', 300, 255);
+        doc.text(`DOCKET NO. ${channelName.toUpperCase()}`, 330, 180);
+        
+        doc.moveDown(4);
+        
+        // Title
+        doc.fontSize(14).font('Helvetica-Bold').text('NOTICE OF APPEARANCE', { align: 'center' });
+        doc.moveDown(2);
+        
+        // Body
+        doc.fontSize(11).font('Helvetica');
+        const bodyText = `I, ${attorneyName}, am admitted or otherwise authorized to practice in this court, and I appear in the above-entitled matter as counsel of record for the ${appearingFor.charAt(0).toUpperCase() + appearingFor.slice(1)}. Please serve a copy of any and all pleadings filed in the above-entitled matter to the undersigned attorney.`;
+        
+        doc.text(bodyText, {
+            align: 'left',
+            lineGap: 5
+        });
+        
+        doc.moveDown(3);
+        
+        // Closing
+        doc.text('Respectfully Submitted,', { align: 'left' });
+        doc.moveDown(2);
+        
+        // Signature line
+        doc.text('_________________________________', { align: 'left' });
+        doc.text(attorneyName, { align: 'left' });
+        
+        // Bar number overlay - positioned at top right of document
+        doc.save();
+        doc.fontSize(10).font('Helvetica-Bold');
+        doc.fillColor('#FF0000');
+        doc.text(`Bar No. ${barNumber}`, 400, 50, { align: 'right' });
+        doc.restore();
+        
+        // Footer with date
+        doc.fontSize(9).font('Helvetica');
+        doc.text(`Filed: ${date.toLocaleDateString()}`, 72, 720, { align: 'left' });
+        doc.text(`Generated: ${new Date().toISOString()}`, 72, 732, { align: 'left' });
+        
+        doc.end();
+    });
+}
+
 function generateStaffInvoiceReceipt(data) {
     const {
         invoiceNumber,
@@ -2731,6 +3365,43 @@ function generateStaffInvoiceReceipt(data) {
 </body>
 </html>
     `;
+}
+
+async function checkDEJCheckins() {
+    try {
+        const dueCheckins = await getDEJCheckinsDue();
+        
+        for (const dej of dueCheckins) {
+            const channel = await client.channels.fetch(dej.channel_id);
+            if (channel) {
+                const embed = new EmbedBuilder()
+                    .setColor(0xFFFF00)
+                    .setTitle('⚠️ PROBATION CHECK-IN REQUIRED')
+                    .setDescription(`Probation check-in is now due.`)
+                    .addFields(
+                        { name: 'Probationer', value: `<@${dej.target_user_id}>`, inline: true },
+                        { name: 'Case', value: dej.case_code, inline: true },
+                        { name: 'Check-in #', value: (dej.checkin_count + 1).toString(), inline: true },
+                        { name: 'Last Check-in', value: dej.last_checkin ? new Date(dej.last_checkin).toLocaleDateString() : 'Never', inline: true },
+                        { name: 'Due Date', value: new Date(dej.next_checkin).toLocaleDateString(), inline: true },
+                        { name: 'Status', value: '🔴 OVERDUE', inline: true },
+                        { name: 'Required Action', value: `<@${dej.target_user_id}> must check in immediately with:\n• Confirmation of compliance with all conditions\n• Any issues or concerns\n• Progress updates`, inline: false }
+                    )
+                    .setTimestamp()
+                    .setFooter({ text: 'Failure to check in may result in probation violation' });
+                
+                await channel.send({ 
+                    content: `<@${dej.target_user_id}> **PROBATION CHECK-IN REQUIRED**`, 
+                    embeds: [embed] 
+                });
+                
+                // Update next check-in date
+                await updateDEJCheckin(dej.id);
+            }
+        }
+    } catch (error) {
+        console.error('Error checking DEJ check-ins:', error);
+    }
 }
 
 client.login(process.env.DISCORD_TOKEN);
