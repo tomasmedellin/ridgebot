@@ -1,7 +1,8 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice } = require('./database');
 const fs = require('fs').promises;
+const PDFDocument = require('pdfkit');
 
 const client = new Client({
     intents: [
@@ -137,7 +138,7 @@ client.once(Events.ClientReady, async readyClient => {
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('vehicles')
-                .setDescription('List owned vehicles with estimated values (e.g., "2020 Honda Civic $15000, 2018 Toyota Camry $12000")')
+                .setDescription('List vehicles with values (e.g., "2020 Honda Civic $15000")')
                 .setRequired(true))
         .addNumberOption(option =>
             option.setName('debts')
@@ -147,6 +148,78 @@ client.once(Events.ClientReady, async readyClient => {
             option.setName('own_home')
                 .setDescription('Do you own your residence?')
                 .setRequired(true));
+    
+    const erpoCommand = new SlashCommandBuilder()
+        .setName('erpo')
+        .setDescription('Issue an Extreme Risk Protection Order')
+        .addUserOption(option =>
+            option.setName('user')
+                .setDescription('The user subject to the ERPO')
+                .setRequired(true));
+    
+    const firearmsRelinquishmentCommand = new SlashCommandBuilder()
+        .setName('firearmsrelinquishment')
+        .setDescription('Submit firearms relinquishment form')
+        .addBooleanOption(option =>
+            option.setName('work_firearms')
+                .setDescription('Do you possess firearms for the nature of your work?')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('firearms_owned')
+                .setDescription('List all firearms owned (e.g., "Glock 19, Remington 870, AR-15")')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('ammunition_owned')
+                .setDescription('Describe ammunition owned (e.g., "200 rounds 9mm, 50 rounds 12ga")')
+                .setRequired(true))
+        .addBooleanOption(option =>
+            option.setName('surrendered_all')
+                .setDescription('Have you surrendered all firearms to Ridgeway County Sheriff?')
+                .setRequired(true))
+        .addBooleanOption(option =>
+            option.setName('understand_prohibition')
+                .setDescription('Do you understand you cannot acquire firearms licenses?')
+                .setRequired(true));
+    
+    const staffInvoiceCommand = new SlashCommandBuilder()
+        .setName('staffinvoice')
+        .setDescription('Submit staff invoice for payment')
+        .addStringOption(option =>
+            option.setName('case_id')
+                .setDescription('Case ID for this invoice')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('role')
+                .setDescription('Your role in this case')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Riding Justice', value: 'riding_justice' },
+                    { name: 'Superior Court Judge', value: 'superior_court_judge' },
+                    { name: 'Magistrate', value: 'magistrate' },
+                    { name: 'Public Defender', value: 'public_defender' },
+                    { name: 'Clerk', value: 'clerk' },
+                    { name: 'Public Defenders Office', value: 'public_defenders_office' }
+                ))
+        .addStringOption(option =>
+            option.setName('duty_type')
+                .setDescription('Type of duty (for Public Defender only)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Duty Counsel', value: 'duty_counsel' },
+                    { name: 'Regular Counsel', value: 'regular_counsel' }
+                ))
+        .addNumberOption(option =>
+            option.setName('hours')
+                .setDescription('Hours worked')
+                .setRequired(false))
+        .addNumberOption(option =>
+            option.setName('reimbursements')
+                .setDescription('Work-related reimbursements (Public Defender only)')
+                .setRequired(false))
+        .addStringOption(option =>
+            option.setName('receipt_url')
+                .setDescription('Receipt URL for reimbursements (Public Defender only)')
+                .setRequired(false));
     
     try {
         await readyClient.application.commands.set([
@@ -163,7 +236,10 @@ client.once(Events.ClientReady, async readyClient => {
             finalRulingCommand.toJSON(),
             appealNoticeCommand.toJSON(),
             certiorariCommand.toJSON(),
-            financialDisclosureCommand.toJSON()
+            financialDisclosureCommand.toJSON(),
+            erpoCommand.toJSON(),
+            firearmsRelinquishmentCommand.toJSON(),
+            staffInvoiceCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -172,6 +248,7 @@ client.once(Events.ClientReady, async readyClient => {
     
     setInterval(checkExpiredDeadlines, 60000); // Check every minute
     setInterval(checkExpiredAppealDeadlines, 60000); // Check every minute for appeal deadlines
+    setInterval(checkExpiredERPODeadlines, 60000); // Check every minute for ERPO deadlines
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -180,7 +257,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const ALLOWED_ROLE_ID = process.env.ALLOWED_ROLE_ID;
     
     // Special handling for case party commands - check if user can send messages in channel
-    const casePartyCommands = ['appealnotice', 'certiorari', 'financialdisclosure'];
+    const casePartyCommands = ['appealnotice', 'certiorari', 'financialdisclosure', 'firearmsrelinquishment'];
     if (casePartyCommands.includes(interaction.commandName)) {
         // If user has the allowed role, they can always use these commands
         if (!interaction.member.roles.cache.has(ALLOWED_ROLE_ID)) {
@@ -1139,6 +1216,445 @@ client.on(Events.InteractionCreate, async interaction => {
             }
         }
     }
+    
+    if (interaction.commandName === 'erpo') {
+        await interaction.deferReply();
+        
+        const targetUser = interaction.options.getUser('user');
+        const channel = interaction.channel;
+        
+        try {
+            // Get case information to extract case code
+            const caseInfo = await getCaseByChannel(interaction.guildId, channel.id);
+            
+            if (!caseInfo) {
+                await interaction.editReply({
+                    content: 'This command can only be used in an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Create 12-hour deadline
+            const deadline = new Date();
+            deadline.setHours(deadline.getHours() + 12);
+            
+            // Create ERPO order in database
+            const erpoOrder = await createERPOOrder(
+                interaction.guildId,
+                channel.id,
+                caseInfo.case_code,
+                targetUser.id,
+                interaction.user.id,
+                deadline
+            );
+            
+            // Generate PDF receipt
+            const pdfBuffer = await generateERPOPDF(erpoOrder, targetUser, interaction.user, caseInfo.case_code, deadline);
+            
+            // Create attachment
+            const filename = `erpo-order-${caseInfo.case_code}-${Date.now()}.pdf`;
+            const attachment = new AttachmentBuilder(pdfBuffer, { name: filename });
+            
+            // Create ERPO embed
+            const erpoEmbed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('🚨 EXTREME RISK PROTECTION ORDER')
+                .setDescription(`An Extreme Risk Protection Order has been issued against ${targetUser}.`)
+                .addFields(
+                    { name: 'Subject', value: `${targetUser}`, inline: true },
+                    { name: 'Issued By', value: `${interaction.user}`, inline: true },
+                    { name: 'Case', value: caseInfo.case_code, inline: true },
+                    { name: '⚖️ ORDER', value: `${targetUser} shall immediately surrender all firearms, ammunition, and firearms accessories in their possession, custody, or control.`, inline: false },
+                    { name: '⏰ DEADLINE', value: `${targetUser} has 12 hours from service of this order to surrender all firearms to Ridgeway County Sheriff's Office or a Bona Fide Peace Officer appointed by the court.`, inline: false },
+                    { name: '📋 REQUIREMENT', value: 'A Firearms Relinquishment Form must be filled out upon surrender.', inline: false },
+                    { name: 'Deadline Time', value: deadline.toLocaleString(), inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'This is a lawful order of the court' });
+            
+            // Send the response with PDF
+            await interaction.editReply({
+                content: `${targetUser}`,
+                embeds: [erpoEmbed],
+                files: [attachment]
+            });
+            
+            // Send follow-up message mentioning the target user
+            await channel.send({
+                content: `⚠️ **LEGAL NOTICE** ⚠️\n${targetUser}, you have been served with an Extreme Risk Protection Order. Please review the order above immediately. You have 12 hours to comply.`
+            });
+            
+        } catch (error) {
+            console.error('Error issuing ERPO:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while issuing the ERPO.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'firearmsrelinquishment') {
+        const channel = interaction.channel;
+        const userId = interaction.user.id;
+        
+        try {
+            // Get case information to verify this is a case channel
+            const caseInfo = await getCaseByChannel(interaction.guildId, channel.id);
+            
+            if (!caseInfo) {
+                await interaction.reply({
+                    content: 'This command can only be used in an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Defer reply as we'll be generating PDFs
+            await interaction.deferReply();
+            
+            // Get all the relinquishment information
+            const workFirearms = interaction.options.getBoolean('work_firearms');
+            const firearmsOwned = interaction.options.getString('firearms_owned');
+            const ammunitionOwned = interaction.options.getString('ammunition_owned');
+            const surrenderedAll = interaction.options.getBoolean('surrendered_all');
+            const understandProhibition = interaction.options.getBoolean('understand_prohibition');
+            
+            // Check if emergency notice is needed (if either of last two questions is false)
+            const emergencyNotice = !surrenderedAll || !understandProhibition;
+            
+            // Save to database
+            await createFirearmsRelinquishment(
+                interaction.guildId,
+                channel.id,
+                caseInfo.case_code,
+                userId,
+                workFirearms,
+                firearmsOwned,
+                ammunitionOwned,
+                surrenderedAll,
+                understandProhibition,
+                emergencyNotice
+            );
+            
+            // Determine embed color based on compliance
+            const embedColor = emergencyNotice ? 0xFF0000 : 0x00FF00; // Red if non-compliant, green if compliant
+            
+            // Create the relinquishment embed
+            const relinquishmentEmbed = new EmbedBuilder()
+                .setColor(embedColor)
+                .setTitle('🔫 FIREARMS RELINQUISHMENT FORM')
+                .setDescription(`Under penalty of perjury, ${interaction.user} has submitted the following firearms relinquishment disclosure:`)
+                .addFields(
+                    { name: 'Work-Related Firearms', value: workFirearms ? 'Yes' : 'No', inline: true },
+                    { name: 'All Firearms Surrendered', value: surrenderedAll ? '✅ Yes' : '❌ No', inline: true },
+                    { name: 'Understands License Prohibition', value: understandProhibition ? '✅ Yes' : '❌ No', inline: true },
+                    { name: 'Firearms Owned', value: firearmsOwned || 'None declared', inline: false },
+                    { name: 'Ammunition Owned', value: ammunitionOwned || 'None declared', inline: false }
+                );
+            
+            // Add emergency notice if needed
+            if (emergencyNotice) {
+                relinquishmentEmbed.addFields(
+                    { name: '🚨 EMERGENCY NOTICE TO COURT', value: 'The respondent has indicated either:\n• They have NOT surrendered all firearms to authorities\n• They do NOT understand the prohibition on acquiring firearms licenses\n\n**IMMEDIATE JUDICIAL REVIEW REQUIRED**', inline: false }
+                );
+            } else {
+                relinquishmentEmbed.addFields(
+                    { name: '✅ COMPLIANCE STATUS', value: 'Respondent has confirmed full compliance with firearms surrender and understanding of license prohibitions.', inline: false }
+                );
+            }
+            
+            relinquishmentEmbed.addFields(
+                { name: '⚖️ LEGAL NOTICE', value: 'These firearms are seized pending resolution of the active court matter. Any false statements made herein may result in criminal prosecution for perjury.', inline: false }
+            );
+            
+            // Add employment protection notice if applicable
+            if (workFirearms) {
+                relinquishmentEmbed.addFields(
+                    { name: '💼 EMPLOYMENT PROTECTION', value: 'An Employment Protection Order has been issued to protect your work status. See attached minute order.', inline: false }
+                );
+            }
+            
+            relinquishmentEmbed
+            .setFooter({ text: `Case: ${caseInfo.case_code} | Filed: ${new Date().toLocaleString()}` })
+            .setTimestamp();
+            
+            // Generate PDF minute order
+            const pdfBuffer = await generateFirearmsRelinquishmentPDF(
+                interaction.user,
+                caseInfo.case_code,
+                {
+                    workFirearms,
+                    firearmsOwned,
+                    ammunitionOwned,
+                    surrenderedAll,
+                    understandProhibition,
+                    emergencyNotice
+                }
+            );
+            
+            // Create attachment
+            const filename = `firearms-relinquishment-${caseInfo.case_code}-${userId}-${Date.now()}.pdf`;
+            const attachment = new AttachmentBuilder(pdfBuffer, { name: filename });
+            
+            // If work firearms, also generate employment protection order
+            let attachments = [attachment];
+            if (workFirearms) {
+                const employmentPdfBuffer = await generateEmploymentProtectionOrder(
+                    interaction.user,
+                    caseInfo.case_code
+                );
+                const employmentFilename = `employment-protection-order-${caseInfo.case_code}-${userId}-${Date.now()}.pdf`;
+                const employmentAttachment = new AttachmentBuilder(employmentPdfBuffer, { name: employmentFilename });
+                attachments.push(employmentAttachment);
+            }
+            
+            // Send the response
+            await interaction.editReply({
+                embeds: [relinquishmentEmbed],
+                files: attachments
+            });
+            
+            // If emergency notice, send additional alert
+            if (emergencyNotice) {
+                const alertEmbed = new EmbedBuilder()
+                    .setColor(0xFF0000)
+                    .setTitle('🚨 URGENT: NON-COMPLIANCE ALERT')
+                    .setDescription('IMMEDIATE ATTENTION REQUIRED')
+                    .addFields(
+                        { name: 'Case', value: caseInfo.case_code, inline: true },
+                        { name: 'Party', value: `${interaction.user}`, inline: true },
+                        { name: 'Issue', value: 'Non-compliance with firearms relinquishment order', inline: false },
+                        { name: 'Details', value: `Surrendered All: ${surrenderedAll ? 'Yes' : '**NO**'}\nUnderstands Prohibition: ${understandProhibition ? 'Yes' : '**NO**'}`, inline: false }
+                    )
+                    .setTimestamp();
+                
+                await channel.send({
+                    content: `<@${caseInfo.judge_id}> <@${caseInfo.clerk_id}>`,
+                    embeds: [alertEmbed]
+                });
+            }
+            
+        } catch (error) {
+            console.error('Error processing firearms relinquishment:', error);
+            
+            try {
+                if (interaction.deferred) {
+                    await interaction.editReply({ 
+                        content: 'An error occurred while processing your firearms relinquishment form.' 
+                    });
+                } else if (!interaction.replied) {
+                    await interaction.reply({ 
+                        content: 'An error occurred while processing your firearms relinquishment form.', 
+                        flags: 64
+                    });
+                }
+            } catch (replyError) {
+                console.error('Error sending error message:', replyError);
+            }
+        }
+    }
+    
+    if (interaction.commandName === 'staffinvoice') {
+        // Check if user has one of the allowed roles
+        const ALLOWED_ROLES = ['1391090162246877336', '1391041650586943588'];
+        const hasAllowedRole = ALLOWED_ROLES.some(roleId => interaction.member.roles.cache.has(roleId));
+        
+        if (!hasAllowedRole) {
+            await interaction.reply({
+                content: 'You do not have permission to submit staff invoices.',
+                flags: 64
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        const caseId = interaction.options.getString('case_id');
+        const role = interaction.options.getString('role');
+        const dutyType = interaction.options.getString('duty_type');
+        const hours = interaction.options.getNumber('hours') || 0;
+        const reimbursements = interaction.options.getNumber('reimbursements') || 0;
+        const receiptUrl = interaction.options.getString('receipt_url');
+        
+        try {
+            // Validate role-specific requirements
+            if (role === 'public_defender' && !dutyType) {
+                await interaction.editReply({
+                    content: 'Public Defenders must specify duty type (Duty Counsel or Regular Counsel).',
+                    flags: 64
+                });
+                return;
+            }
+            
+            if ((role === 'clerk' || role.includes('judge') || role === 'magistrate') && !hours) {
+                await interaction.editReply({
+                    content: 'Hours worked is required for your role.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            if (reimbursements > 0 && role !== 'public_defender') {
+                await interaction.editReply({
+                    content: 'Only Public Defenders can request reimbursements.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Calculate payment based on role
+            let basePay = 0;
+            let hourlyRate = 0;
+            let roleDisplay = '';
+            
+            switch(role) {
+                case 'magistrate':
+                    basePay = 1000;
+                    hourlyRate = 50;
+                    roleDisplay = 'Magistrate';
+                    break;
+                case 'riding_justice':
+                    basePay = 5000;
+                    hourlyRate = 100;
+                    roleDisplay = 'Riding Justice';
+                    break;
+                case 'superior_court_judge':
+                    basePay = 3000;
+                    hourlyRate = 50;
+                    roleDisplay = 'Superior Court Judge';
+                    break;
+                case 'public_defender':
+                    if (dutyType === 'duty_counsel') {
+                        basePay = 1000;
+                        roleDisplay = 'Public Defender (Duty Counsel)';
+                    } else {
+                        basePay = 3000;
+                        roleDisplay = 'Public Defender (Regular Counsel)';
+                    }
+                    hourlyRate = 150;
+                    break;
+                case 'clerk':
+                    basePay = 0;
+                    hourlyRate = 25; // Assuming hourly rate for clerks
+                    roleDisplay = 'Clerk';
+                    break;
+                case 'public_defenders_office':
+                    basePay = 0;
+                    hourlyRate = 0;
+                    roleDisplay = 'Public Defenders Office';
+                    break;
+            }
+            
+            const hourlyPay = hours * hourlyRate;
+            const totalAmount = basePay + hourlyPay + reimbursements;
+            
+            // Generate invoice number
+            const invoiceNumber = `INV-${Date.now().toString(36).toUpperCase()}`;
+            
+            // Save to database
+            await createStaffInvoice(
+                interaction.guildId,
+                interaction.channelId,
+                caseId,
+                interaction.user.id,
+                role,
+                dutyType,
+                hours,
+                basePay,
+                hourlyRate,
+                reimbursements,
+                receiptUrl,
+                totalAmount,
+                invoiceNumber
+            );
+            
+            // Generate receipt HTML
+            const receiptHtml = generateStaffInvoiceReceipt({
+                invoiceNumber,
+                date: new Date(),
+                userName: interaction.user.username,
+                userId: interaction.user.id,
+                caseId,
+                roleDisplay,
+                basePay,
+                hours,
+                hourlyRate,
+                hourlyPay,
+                reimbursements,
+                receiptUrl,
+                totalAmount
+            });
+            
+            // Create temporary file for receipt
+            const filename = `staff-invoice-${invoiceNumber}.html`;
+            const filepath = `/tmp/${filename}`;
+            await fs.writeFile(filepath, receiptHtml);
+            
+            // Create attachment
+            const receiptAttachment = new AttachmentBuilder(filepath, { name: filename });
+            
+            // Create invoice embed
+            const invoiceEmbed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('💰 STAFF INVOICE SUBMITTED')
+                .setDescription(`Invoice #${invoiceNumber}`)
+                .addFields(
+                    { name: 'Staff Member', value: `${interaction.user}`, inline: true },
+                    { name: 'Role', value: roleDisplay, inline: true },
+                    { name: 'Case ID', value: caseId, inline: true },
+                    { name: 'Base Pay', value: `$${basePay.toFixed(2)}`, inline: true },
+                    { name: 'Hours Worked', value: hours.toString(), inline: true },
+                    { name: 'Hourly Rate', value: `$${hourlyRate.toFixed(2)}/hr`, inline: true },
+                    { name: 'Hourly Pay', value: `$${hourlyPay.toFixed(2)}`, inline: true },
+                    { name: 'Reimbursements', value: `$${reimbursements.toFixed(2)}`, inline: true },
+                    { name: 'Total Amount', value: `**$${totalAmount.toFixed(2)}**`, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Invoice submitted for processing' });
+            
+            // Send the response with receipt
+            await interaction.editReply({
+                embeds: [invoiceEmbed],
+                files: [receiptAttachment]
+            });
+            
+            // Clean up temp file
+            await fs.unlink(filepath);
+            
+            // Get Clerk of Superior Court role ID (you may need to update this)
+            const CLERK_OF_SUPERIOR_COURT_ID = '1391058529510494369'; // Update this with actual channel ID
+            
+            try {
+                const clerkChannel = await client.channels.fetch(CLERK_OF_SUPERIOR_COURT_ID);
+                if (clerkChannel) {
+                    const clerkEmbed = new EmbedBuilder()
+                        .setColor(0x0099FF)
+                        .setTitle('📋 NEW STAFF INVOICE')
+                        .setDescription(`A new staff invoice has been submitted for payment.`)
+                        .addFields(
+                            { name: 'Invoice Number', value: invoiceNumber, inline: true },
+                            { name: 'Staff Member', value: `<@${interaction.user.id}>`, inline: true },
+                            { name: 'Total Cost', value: `**$${totalAmount.toFixed(2)}**`, inline: true },
+                            { name: 'Role', value: roleDisplay, inline: false },
+                            { name: 'Case ID', value: caseId, inline: false }
+                        )
+                        .setTimestamp();
+                    
+                    await clerkChannel.send({ embeds: [clerkEmbed] });
+                }
+            } catch (clerkError) {
+                console.error('Error notifying Clerk of Superior Court:', clerkError);
+            }
+            
+        } catch (error) {
+            console.error('Error processing staff invoice:', error);
+            await interaction.editReply({
+                content: 'An error occurred while processing your invoice.',
+                flags: 64
+            });
+        }
+    }
 });
 
 function generateTranscriptHTML(channel, messages) {
@@ -1634,6 +2150,587 @@ async function checkExpiredAppealDeadlines() {
     } catch (error) {
         console.error('Error checking expired appeal deadlines:', error);
     }
+}
+
+async function generateERPOPDF(erpoOrder, targetUser, issuedBy, caseCode, deadline) {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({
+            size: 'LETTER',
+            margins: {
+                top: 72,
+                bottom: 72,
+                left: 72,
+                right: 72
+            }
+        });
+        
+        const chunks = [];
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        
+        // Header
+        doc.fontSize(12).text('SUPERIOR COURT OF RIDGEWAY', { align: 'center' });
+        doc.fontSize(10).text('County of Ridgeway', { align: 'center' });
+        doc.moveDown();
+        
+        // Title
+        doc.fontSize(16).font('Helvetica-Bold').text('EXTREME RISK PROTECTION ORDER', { align: 'center' });
+        doc.fontSize(14).text('(MINUTE ORDER)', { align: 'center' });
+        doc.moveDown();
+        
+        // Case Information
+        doc.fontSize(11).font('Helvetica');
+        doc.text(`Case Number: ${caseCode}`, { align: 'left' });
+        doc.text(`Date Issued: ${new Date().toLocaleString()}`, { align: 'left' });
+        doc.text(`Order ID: ERPO-${erpoOrder.id}`, { align: 'left' });
+        doc.moveDown();
+        
+        // Parties
+        doc.font('Helvetica-Bold').text('PARTIES:', { underline: true });
+        doc.font('Helvetica');
+        doc.text(`Subject of Order: ${targetUser.username} (ID: ${targetUser.id})`);
+        doc.text(`Issued By: ${issuedBy.username} (ID: ${issuedBy.id})`);
+        doc.moveDown();
+        
+        // The Order
+        doc.font('Helvetica-Bold').fontSize(12).text('THE COURT HEREBY ORDERS:', { underline: true });
+        doc.font('Helvetica').fontSize(11);
+        doc.moveDown(0.5);
+        
+        doc.text('1. The above-named subject SHALL IMMEDIATELY surrender all firearms, ammunition, and firearms accessories in their possession, custody, or control.');
+        doc.moveDown(0.5);
+        
+        doc.text('2. The subject has TWELVE (12) HOURS from service of this order to surrender all firearms to:');
+        doc.text('   • Ridgeway County Sheriff\'s Office, OR', { indent: 20 });
+        doc.text('   • A Bona Fide Peace Officer appointed by the court', { indent: 20 });
+        doc.moveDown(0.5);
+        
+        doc.text('3. Upon surrender, the subject MUST complete a Firearms Relinquishment Form.');
+        doc.moveDown(0.5);
+        
+        doc.text(`4. Compliance Deadline: ${deadline.toLocaleString()}`);
+        doc.moveDown();
+        
+        // Warning
+        doc.font('Helvetica-Bold').text('WARNING:', { underline: true });
+        doc.font('Helvetica').text('Failure to comply with this order may result in criminal prosecution and/or contempt of court proceedings.');
+        doc.moveDown();
+        
+        // Legal Authority
+        doc.font('Helvetica-Bold').text('LEGAL AUTHORITY:', { underline: true });
+        doc.font('Helvetica').text('This order is issued pursuant to the Extreme Risk Protection Order Act of Ridgeway County.');
+        doc.moveDown(2);
+        
+        // Signature Lines
+        doc.text('_________________________________', { align: 'center' });
+        doc.text('Judicial Officer', { align: 'center' });
+        doc.moveDown();
+        
+        doc.text('_________________________________', { align: 'center' });
+        doc.text('Date and Time', { align: 'center' });
+        doc.moveDown(2);
+        
+        // Footer
+        doc.fontSize(9).text('This is an official court document. Any alteration or falsification is a criminal offense.', { align: 'center' });
+        doc.text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
+        
+        doc.end();
+    });
+}
+
+async function generateFirearmsRelinquishmentPDF(user, caseCode, data) {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({
+            size: 'LETTER',
+            margins: {
+                top: 72,
+                bottom: 72,
+                left: 72,
+                right: 72
+            }
+        });
+        
+        const chunks = [];
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        
+        // Header
+        doc.fontSize(12).text('SUPERIOR COURT OF RIDGEWAY', { align: 'center' });
+        doc.fontSize(10).text('County of Ridgeway', { align: 'center' });
+        doc.moveDown();
+        
+        // Title
+        doc.fontSize(16).font('Helvetica-Bold').text('FIREARMS RELINQUISHMENT FORM', { align: 'center' });
+        doc.moveDown();
+        
+        // Emergency Notice if applicable
+        if (data.emergencyNotice) {
+            doc.fillColor('red').fontSize(14).font('Helvetica-Bold')
+                .text('*** EMERGENCY NOTICE TO COURT ***', { align: 'center' });
+            doc.fillColor('black').font('Helvetica').fontSize(11);
+            doc.moveDown();
+        }
+        
+        // Case Information
+        doc.fontSize(11).font('Helvetica');
+        doc.text(`Case Number: ${caseCode}`, { align: 'left' });
+        doc.text(`Date Filed: ${new Date().toLocaleString()}`, { align: 'left' });
+        doc.text(`Form ID: FR-${Date.now()}`, { align: 'left' });
+        doc.moveDown();
+        
+        // Declarant Information
+        doc.font('Helvetica-Bold').text('DECLARANT:', { underline: true });
+        doc.font('Helvetica');
+        doc.text(`Name: ${user.username}`);
+        doc.text(`Discord ID: ${user.id}`);
+        doc.moveDown();
+        
+        // Declaration
+        doc.font('Helvetica-Bold').fontSize(12).text('DECLARATION UNDER PENALTY OF PERJURY:', { underline: true });
+        doc.font('Helvetica').fontSize(11);
+        doc.moveDown(0.5);
+        
+        doc.text('I, the undersigned, declare under penalty of perjury that:');
+        doc.moveDown(0.5);
+        
+        // Work Firearms
+        doc.text(`1. ${data.workFirearms ? 'I DO' : 'I DO NOT'} possess firearms for the nature of my work.`);
+        doc.moveDown(0.5);
+        
+        // Firearms Owned
+        doc.text('2. Firearms in my possession, custody, or control:');
+        doc.text(`   ${data.firearmsOwned || 'NONE'}`, { indent: 20 });
+        doc.moveDown(0.5);
+        
+        // Ammunition Owned
+        doc.text('3. Ammunition in my possession, custody, or control:');
+        doc.text(`   ${data.ammunitionOwned || 'NONE'}`, { indent: 20 });
+        doc.moveDown(0.5);
+        
+        // Surrender Status
+        doc.text(`4. ${data.surrenderedAll ? 'I HAVE' : 'I HAVE NOT'} surrendered all firearms in my possession to the Ridgeway County Sheriff's Office.`);
+        if (!data.surrenderedAll) {
+            doc.fillColor('red').font('Helvetica-Bold').text('   *** NON-COMPLIANT ***', { indent: 20 });
+            doc.fillColor('black').font('Helvetica');
+        }
+        doc.moveDown(0.5);
+        
+        // Understanding of Prohibition
+        doc.text(`5. ${data.understandProhibition ? 'I UNDERSTAND' : 'I DO NOT UNDERSTAND'} that I am prohibited from acquiring a Ridgeway Firearms Identification License or Automatic Firearms License.`);
+        if (!data.understandProhibition) {
+            doc.fillColor('red').font('Helvetica-Bold').text('   *** REQUIRES CLARIFICATION ***', { indent: 20 });
+            doc.fillColor('black').font('Helvetica');
+        }
+        doc.moveDown();
+        
+        // Legal Notice
+        doc.font('Helvetica-Bold').text('LEGAL NOTICE:', { underline: true });
+        doc.font('Helvetica').text('All firearms listed herein are seized pending resolution of the active court matter. Any attempt to acquire, possess, or control firearms in violation of this order may result in criminal prosecution.');
+        doc.moveDown();
+        
+        // Compliance Status
+        if (data.emergencyNotice) {
+            doc.fillColor('red').font('Helvetica-Bold').fontSize(12).text('COMPLIANCE STATUS: NON-COMPLIANT', { underline: true });
+            doc.font('Helvetica').fontSize(11);
+            doc.text('Immediate judicial intervention required. Party has indicated:');
+            if (!data.surrenderedAll) doc.text('• Failure to surrender all firearms');
+            if (!data.understandProhibition) doc.text('• Lack of understanding regarding firearms prohibition');
+            doc.fillColor('black');
+        } else {
+            doc.fillColor('green').font('Helvetica-Bold').fontSize(12).text('COMPLIANCE STATUS: COMPLIANT', { underline: true });
+            doc.font('Helvetica').fontSize(11);
+            doc.text('Party has confirmed full compliance with all requirements.');
+            doc.fillColor('black');
+        }
+        doc.moveDown(2);
+        
+        // Certification
+        doc.font('Helvetica-Bold').text('CERTIFICATION:', { underline: true });
+        doc.font('Helvetica').text('I declare under penalty of perjury under the laws of Ridgeway that the foregoing is true and correct.');
+        doc.moveDown();
+        
+        doc.text(`Executed on: ${new Date().toLocaleDateString()}`);
+        doc.text(`At: ${new Date().toLocaleTimeString()}`);
+        doc.moveDown(2);
+        
+        // Digital Signature
+        doc.text('_________________________________');
+        doc.text(`Digital Signature: ${user.username}`);
+        doc.moveDown(3);
+        
+        // Footer
+        doc.fontSize(9).text('This is an official court document. Any alteration or falsification is a criminal offense.', { align: 'center' });
+        doc.text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
+        
+        doc.end();
+    });
+}
+
+async function generateEmploymentProtectionOrder(user, caseCode) {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({
+            size: 'LETTER',
+            margins: {
+                top: 72,
+                bottom: 72,
+                left: 72,
+                right: 72
+            }
+        });
+        
+        const chunks = [];
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        
+        // Header
+        doc.fontSize(12).text('SUPERIOR COURT OF RIDGEWAY', { align: 'center' });
+        doc.fontSize(10).text('County of Ridgeway', { align: 'center' });
+        doc.moveDown();
+        
+        // Title
+        doc.fontSize(16).font('Helvetica-Bold').text('EMPLOYMENT PROTECTION ORDER', { align: 'center' });
+        doc.fontSize(14).text('(MINUTE ORDER)', { align: 'center' });
+        doc.moveDown();
+        
+        // Case Information
+        doc.fontSize(11).font('Helvetica');
+        doc.text(`Case Number: ${caseCode}`, { align: 'left' });
+        doc.text(`Date Issued: ${new Date().toLocaleString()}`, { align: 'left' });
+        doc.text(`Order ID: EPO-${Date.now()}`, { align: 'left' });
+        doc.moveDown();
+        
+        // Subject Information
+        doc.font('Helvetica-Bold').text('SUBJECT OF ORDER:', { underline: true });
+        doc.font('Helvetica');
+        doc.text(`Name: ${user.username}`);
+        doc.text(`Discord ID: ${user.id}`);
+        doc.moveDown();
+        
+        // Court Findings
+        doc.font('Helvetica-Bold').fontSize(12).text('COURT FINDINGS:', { underline: true });
+        doc.font('Helvetica').fontSize(11);
+        doc.text('The Court finds that the above-named individual has disclosed possession of firearms for the nature of their work, and is subject to firearms restrictions pending resolution of this matter.');
+        doc.moveDown();
+        
+        // The Order
+        doc.font('Helvetica-Bold').fontSize(12).text('THE COURT HEREBY ORDERS:', { underline: true });
+        doc.font('Helvetica').fontSize(11);
+        doc.moveDown(0.5);
+        
+        // Section 1: Mandatory Accommodations
+        doc.font('Helvetica-Bold').text('1. MANDATORY EMPLOYMENT ACCOMMODATIONS');
+        doc.font('Helvetica');
+        doc.text('The employer of the above-named individual SHALL provide the following accommodations:');
+        doc.moveDown(0.5);
+        
+        doc.text('a) Administrative Leave Option: Place employee on paid administrative leave with continuation of all benefits, OR', { indent: 20 });
+        doc.moveDown(0.5);
+        
+        doc.text('b) Reassignment Option: Reassign employee to duties not requiring firearm access, with:', { indent: 20 });
+        doc.text('• No reduction in pay, benefits, or seniority', { indent: 40 });
+        doc.text('• Comparable position and responsibilities', { indent: 40 });
+        doc.text('• Maintenance of all employment privileges', { indent: 40 });
+        doc.moveDown();
+        
+        // Section 2: Prohibited Actions
+        doc.font('Helvetica-Bold').text('2. PROHIBITED ACTIONS');
+        doc.font('Helvetica');
+        doc.text('The employer is PROHIBITED from:');
+        doc.text('• Terminating employment based on firearm restrictions', { indent: 20 });
+        doc.text('• Reducing compensation or benefits', { indent: 20 });
+        doc.text('• Taking any adverse employment action', { indent: 20 });
+        doc.text('• Discriminating or retaliating against the employee', { indent: 20 });
+        doc.moveDown();
+        
+        // Section 3: Duration
+        doc.font('Helvetica-Bold').text('3. DURATION');
+        doc.font('Helvetica');
+        doc.text('This Order shall remain in full force and effect until this case is fully resolved, including:');
+        doc.text('• Final disposition of all charges', { indent: 20 });
+        doc.text('• Completion of any appeals', { indent: 20 });
+        doc.text('• Satisfaction of any sentence or probation', { indent: 20 });
+        doc.text('• Final resolution of all related proceedings', { indent: 20 });
+        doc.moveDown();
+        
+        // Enforcement
+        doc.font('Helvetica-Bold').text('ENFORCEMENT:', { underline: true });
+        doc.font('Helvetica').text('Violation of this Order may result in contempt of court proceedings and civil liability. This Order is enforceable by law enforcement and may be presented to employers as a lawful court mandate.');
+        doc.moveDown(2);
+        
+        // Signature
+        doc.text('IT IS SO ORDERED.', { align: 'center' });
+        doc.moveDown();
+        doc.text('_________________________________', { align: 'center' });
+        doc.text('Judicial Officer', { align: 'center' });
+        doc.moveDown();
+        doc.text(`Date: ${new Date().toLocaleDateString()}`, { align: 'center' });
+        doc.moveDown(2);
+        
+        // Footer
+        doc.fontSize(9).text('This is an official court order. Any violation may result in criminal prosecution.', { align: 'center' });
+        doc.text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
+        
+        doc.end();
+    });
+}
+
+async function checkExpiredERPODeadlines() {
+    try {
+        const expiredOrders = await getExpiredERPOOrders();
+        
+        for (const order of expiredOrders) {
+            const channel = await client.channels.fetch(order.channel_id);
+            if (channel) {
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF0000)
+                    .setTitle('🚨 ERPO Deadline Expired')
+                    .setDescription(`The 12-hour deadline for ERPO compliance has expired.`)
+                    .addFields(
+                        { name: 'Subject', value: `<@${order.target_user_id}>`, inline: true },
+                        { name: 'Issued By', value: `<@${order.issued_by}>`, inline: true },
+                        { name: 'Case', value: order.case_code, inline: true },
+                        { name: 'Deadline Was', value: new Date(order.deadline).toLocaleString(), inline: false },
+                        { name: 'Status', value: '⚠️ **NON-COMPLIANT** - Subject failed to surrender firearms within the required timeframe.', inline: false },
+                        { name: 'Next Steps', value: 'The court may initiate contempt proceedings or refer to law enforcement for criminal prosecution.', inline: false }
+                    )
+                    .setTimestamp()
+                    .setFooter({ text: 'Automatic notification of non-compliance' });
+                
+                await channel.send({ 
+                    content: `<@${order.issued_by}> <@${order.target_user_id}>`, 
+                    embeds: [embed] 
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Error checking expired ERPO deadlines:', error);
+    }
+}
+
+function generateStaffInvoiceReceipt(data) {
+    const {
+        invoiceNumber,
+        date,
+        userName,
+        userId,
+        caseId,
+        roleDisplay,
+        basePay,
+        hours,
+        hourlyRate,
+        hourlyPay,
+        reimbursements,
+        receiptUrl,
+        totalAmount
+    } = data;
+    
+    const receiptDate = date.toLocaleDateString();
+    const receiptTime = date.toLocaleTimeString();
+    
+    return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Staff Invoice - ${invoiceNumber}</title>
+    <style>
+        @page {
+            size: 80mm 297mm;
+            margin: 0;
+        }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .receipt {
+            background: white;
+            width: 300px;
+            margin: 0 auto;
+            padding: 20px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            border: 1px solid #ddd;
+        }
+        .header {
+            text-align: center;
+            border-bottom: 2px dashed #333;
+            padding-bottom: 15px;
+            margin-bottom: 15px;
+        }
+        .store-name {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            letter-spacing: 2px;
+        }
+        .tagline {
+            font-size: 10px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        .receipt-info {
+            font-size: 10px;
+            color: #666;
+        }
+        .section {
+            margin: 15px 0;
+            border-bottom: 1px dashed #ccc;
+            padding-bottom: 10px;
+        }
+        .item-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+        .item-name {
+            flex: 1;
+            text-align: left;
+        }
+        .item-price {
+            text-align: right;
+            min-width: 80px;
+        }
+        .subtotal {
+            font-weight: bold;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+        }
+        .total {
+            font-size: 16px;
+            font-weight: bold;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 2px solid #333;
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 10px;
+            color: #666;
+        }
+        .barcode {
+            text-align: center;
+            margin: 15px 0;
+            font-family: 'Libre Barcode 128', monospace;
+            font-size: 32px;
+            letter-spacing: 3px;
+        }
+        .thank-you {
+            text-align: center;
+            font-size: 14px;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            .receipt {
+                box-shadow: none;
+                border: none;
+                width: 80mm;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="receipt">
+        <div class="header">
+            <div class="store-name">RIDGEWAY COURT</div>
+            <div class="tagline">PAYROLL DEPARTMENT</div>
+            <div class="receipt-info">
+                <div>${receiptDate} ${receiptTime}</div>
+                <div>Invoice #: ${invoiceNumber}</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="item-row">
+                <div class="item-name">Staff Member:</div>
+                <div class="item-price">${userName}</div>
+            </div>
+            <div class="item-row">
+                <div class="item-name">Staff ID:</div>
+                <div class="item-price">${userId}</div>
+            </div>
+            <div class="item-row">
+                <div class="item-name">Case ID:</div>
+                <div class="item-price">${caseId}</div>
+            </div>
+            <div class="item-row">
+                <div class="item-name">Role:</div>
+                <div class="item-price">${roleDisplay}</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="item-row">
+                <div class="item-name">BASE PAY</div>
+                <div class="item-price">$${basePay.toFixed(2)}</div>
+            </div>
+            ${hours > 0 ? `
+            <div class="item-row">
+                <div class="item-name">HOURS WORKED</div>
+                <div class="item-price">${hours.toFixed(2)}</div>
+            </div>
+            <div class="item-row">
+                <div class="item-name">HOURLY RATE</div>
+                <div class="item-price">$${hourlyRate.toFixed(2)}/hr</div>
+            </div>
+            <div class="item-row">
+                <div class="item-name">HOURLY PAY</div>
+                <div class="item-price">$${hourlyPay.toFixed(2)}</div>
+            </div>
+            ` : ''}
+            ${reimbursements > 0 ? `
+            <div class="item-row">
+                <div class="item-name">REIMBURSEMENTS</div>
+                <div class="item-price">$${reimbursements.toFixed(2)}</div>
+            </div>
+            ${receiptUrl ? `
+            <div class="item-row" style="font-size: 10px;">
+                <div class="item-name">Receipt: ${receiptUrl.substring(0, 30)}...</div>
+            </div>
+            ` : ''}
+            ` : ''}
+        </div>
+        
+        <div class="total item-row">
+            <div class="item-name">TOTAL DUE</div>
+            <div class="item-price">$${totalAmount.toFixed(2)}</div>
+        </div>
+        
+        <div class="barcode">
+            ||||| |||| | |||| ||||| ||| |||||
+        </div>
+        
+        <div class="footer">
+            <div>PAYROLL COPY</div>
+            <div>KEEP FOR YOUR RECORDS</div>
+            <div style="margin-top: 10px;">
+                Questions? Contact Clerk of Superior Court<br>
+                Reference: ${invoiceNumber}
+            </div>
+        </div>
+        
+        <div class="thank-you">
+            THANK YOU FOR YOUR SERVICE
+        </div>
+    </div>
+</body>
+</html>
+    `;
 }
 
 client.login(process.env.DISCORD_TOKEN);

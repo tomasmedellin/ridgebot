@@ -123,6 +123,59 @@ async function initializeDatabase() {
             )
         `);
         
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS erpo_orders (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                channel_id VARCHAR(32) NOT NULL,
+                case_code VARCHAR(50) NOT NULL,
+                target_user_id VARCHAR(32) NOT NULL,
+                issued_by VARCHAR(32) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deadline TIMESTAMP NOT NULL,
+                surrendered BOOLEAN DEFAULT FALSE,
+                surrendered_at TIMESTAMP,
+                pdf_receipt_url TEXT
+            )
+        `);
+        
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS firearms_relinquishments (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                channel_id VARCHAR(32) NOT NULL,
+                case_code VARCHAR(50) NOT NULL,
+                user_id VARCHAR(32) NOT NULL,
+                work_firearms BOOLEAN NOT NULL,
+                firearms_owned TEXT NOT NULL,
+                ammunition_owned TEXT NOT NULL,
+                surrendered_all BOOLEAN NOT NULL,
+                understand_prohibition BOOLEAN NOT NULL,
+                emergency_notice BOOLEAN NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS staff_invoices (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                channel_id VARCHAR(32) NOT NULL,
+                case_id VARCHAR(50) NOT NULL,
+                user_id VARCHAR(32) NOT NULL,
+                role_type VARCHAR(50) NOT NULL,
+                duty_type VARCHAR(50),
+                hours_worked DECIMAL(5, 2),
+                base_pay DECIMAL(10, 2) NOT NULL,
+                hourly_rate DECIMAL(10, 2),
+                reimbursements DECIMAL(10, 2) DEFAULT 0,
+                receipt_url TEXT,
+                total_amount DECIMAL(10, 2) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                invoice_number VARCHAR(20) NOT NULL
+            )
+        `);
+        
         console.log('Database initialized successfully');
     } catch (error) {
         console.error('Error initializing database:', error);
@@ -282,6 +335,62 @@ async function createFinancialDisclosure(guildId, channelId, userId, bankBalance
     return result.rows[0];
 }
 
+async function createERPOOrder(guildId, channelId, caseCode, targetUserId, issuedBy, deadline) {
+    const query = `
+        INSERT INTO erpo_orders (guild_id, channel_id, case_code, target_user_id, issued_by, deadline)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING *
+    `;
+    const values = [guildId, channelId, caseCode, targetUserId, issuedBy, deadline];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
+async function getExpiredERPOOrders() {
+    const query = `
+        SELECT * FROM erpo_orders 
+        WHERE deadline <= CURRENT_TIMESTAMP 
+        AND surrendered = FALSE
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+}
+
+async function markERPOSurrendered(id, pdfUrl) {
+    const query = `
+        UPDATE erpo_orders 
+        SET surrendered = TRUE, surrendered_at = CURRENT_TIMESTAMP, pdf_receipt_url = $2
+        WHERE id = $1
+        RETURNING *
+    `;
+    const result = await pool.query(query, [id, pdfUrl]);
+    return result.rows[0];
+}
+
+async function createFirearmsRelinquishment(guildId, channelId, caseCode, userId, workFirearms, firearmsOwned, ammunitionOwned, surrenderedAll, understandProhibition, emergencyNotice) {
+    const query = `
+        INSERT INTO firearms_relinquishments 
+        (guild_id, channel_id, case_code, user_id, work_firearms, firearms_owned, ammunition_owned, surrendered_all, understand_prohibition, emergency_notice)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *
+    `;
+    const values = [guildId, channelId, caseCode, userId, workFirearms, firearmsOwned, ammunitionOwned, surrenderedAll, understandProhibition, emergencyNotice];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
+async function createStaffInvoice(guildId, channelId, caseId, userId, roleType, dutyType, hoursWorked, basePay, hourlyRate, reimbursements, receiptUrl, totalAmount, invoiceNumber) {
+    const query = `
+        INSERT INTO staff_invoices 
+        (guild_id, channel_id, case_id, user_id, role_type, duty_type, hours_worked, base_pay, hourly_rate, reimbursements, receipt_url, total_amount, invoice_number)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        RETURNING *
+    `;
+    const values = [guildId, channelId, caseId, userId, roleType, dutyType, hoursWorked, basePay, hourlyRate, reimbursements, receiptUrl, totalAmount, invoiceNumber];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
 module.exports = {
     initializeDatabase,
     createDiscoveryDeadline,
@@ -298,5 +407,10 @@ module.exports = {
     fileAppealNotice,
     getActiveAppealDeadline,
     createAppealFiling,
-    createFinancialDisclosure
+    createFinancialDisclosure,
+    createERPOOrder,
+    getExpiredERPOOrders,
+    markERPOSurrendered,
+    createFirearmsRelinquishment,
+    createStaffInvoice
 };

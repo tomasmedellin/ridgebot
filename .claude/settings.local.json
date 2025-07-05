@@ -8,7 +8,9 @@
       "Bash(npm start)",
       "Bash(test:*)",
       "Bash(npm run lint)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npm run build:*)"
     ],
     "deny": []
   }
