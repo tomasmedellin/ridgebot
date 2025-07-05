@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(node generate-invite.js)",
+      "Bash(kill:*)",
+      "Bash(npm start)",
+      "Bash(test:*)",
+      "Bash(npm run lint)",
+      "Bash(grep:*)"
+    ],
+    "deny": []
+  }
+}
