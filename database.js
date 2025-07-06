@@ -246,6 +246,23 @@ async function initializeDatabase() {
             )
         `);
         
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS fee_invoices (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                channel_id VARCHAR(32) NOT NULL,
+                case_code VARCHAR(50) NOT NULL,
+                user_id VARCHAR(32) NOT NULL,
+                fee_category VARCHAR(100) NOT NULL,
+                amount DECIMAL(10, 2) NOT NULL,
+                invoice_number VARCHAR(20) NOT NULL UNIQUE,
+                status VARCHAR(20) DEFAULT 'unpaid',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at TIMESTAMP,
+                paid_by VARCHAR(32)
+            )
+        `);
+        
         console.log('Database initialized successfully');
     } catch (error) {
         console.error('Error initializing database:', error);
@@ -534,6 +551,58 @@ async function markHearingReminderSent(id, reminderType) {
     return result.rows[0];
 }
 
+async function createFeeInvoice(guildId, channelId, caseCode, userId, feeCategory, amount, invoiceNumber) {
+    const query = `
+        INSERT INTO fee_invoices 
+        (guild_id, channel_id, case_code, user_id, fee_category, amount, invoice_number)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+    `;
+    const values = [guildId, channelId, caseCode, userId, feeCategory, amount, invoiceNumber];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
+async function getFeesByUserAndCase(guildId, userId, caseCode) {
+    const query = `
+        SELECT * FROM fee_invoices 
+        WHERE guild_id = $1 AND user_id = $2 AND case_code = $3
+        ORDER BY created_at DESC
+    `;
+    const result = await pool.query(query, [guildId, userId, caseCode]);
+    return result.rows;
+}
+
+async function getFeeByInvoiceNumber(guildId, invoiceNumber) {
+    const query = `
+        SELECT * FROM fee_invoices 
+        WHERE guild_id = $1 AND invoice_number = $2
+    `;
+    const result = await pool.query(query, [guildId, invoiceNumber]);
+    return result.rows[0];
+}
+
+async function markFeePaid(guildId, invoiceNumber, paidBy) {
+    const query = `
+        UPDATE fee_invoices 
+        SET status = 'paid', paid_at = CURRENT_TIMESTAMP, paid_by = $3
+        WHERE guild_id = $1 AND invoice_number = $2 AND status = 'unpaid'
+        RETURNING *
+    `;
+    const result = await pool.query(query, [guildId, invoiceNumber, paidBy]);
+    return result.rows[0];
+}
+
+async function getAllFeesByUser(guildId, userId) {
+    const query = `
+        SELECT * FROM fee_invoices 
+        WHERE guild_id = $1 AND user_id = $2
+        ORDER BY case_code, created_at DESC
+    `;
+    const result = await pool.query(query, [guildId, userId]);
+    return result.rows;
+}
+
 module.exports = {
     initializeDatabase,
     createDiscoveryDeadline,
@@ -561,5 +630,10 @@ module.exports = {
     updateDEJCheckin,
     createHearing,
     getUpcomingHearingReminders,
-    markHearingReminderSent
+    markHearingReminderSent,
+    createFeeInvoice,
+    getFeesByUserAndCase,
+    getFeeByInvoiceNumber,
+    markFeePaid,
+    getAllFeesByUser
 };

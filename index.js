@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const axios = require('axios');
@@ -367,6 +367,58 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('The case channel')
                 .setRequired(true));
     
+    const imposeFeeCommand = new SlashCommandBuilder()
+        .setName('imposefee')
+        .setDescription('Imposes court fee within a case')
+        .addUserOption(option =>
+            option.setName('target')
+                .setDescription('The user to impose the fee on')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('category')
+                .setDescription('Fee category')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Initial Motion Civil Case Cost ($435)', value: 'initial_civil' },
+                    { name: 'Initial Motion Small Claims Case ($75)', value: 'initial_small_claims' },
+                    { name: 'Summary Judgement Motion ($500)', value: 'summary_judgement' },
+                    { name: 'General Motion Cost ($100)', value: 'general_motion' },
+                    { name: 'Small Claims Frequent Filer Fee ($100)', value: 'frequent_filer' },
+                    { name: 'Summons ($75)', value: 'summons' },
+                    { name: 'Summons by Publication ($200)', value: 'summons_publication' },
+                    { name: 'Hearing Scheduling ($60)', value: 'hearing_scheduling' },
+                    { name: 'Petition for Vehicle Forfeiture ($100)', value: 'vehicle_forfeiture' },
+                    { name: 'Petition for General Forfeiture ($200)', value: 'general_forfeiture' }
+                ));
+    
+    const feeStatusCommand = new SlashCommandBuilder()
+        .setName('feestatus')
+        .setDescription('Displays a user fee status during a case')
+        .addUserOption(option =>
+            option.setName('target')
+                .setDescription('The user to check fee status')
+                .setRequired(true));
+    
+    const executeFeeCommand = new SlashCommandBuilder()
+        .setName('executefee')
+        .setDescription('Mark a fee as paid')
+        .addUserOption(option =>
+            option.setName('target')
+                .setDescription('The user who paid the fee')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('invoice')
+                .setDescription('Fee invoice number')
+                .setRequired(true));
+    
+    const sudoFeeStatusCommand = new SlashCommandBuilder()
+        .setName('sudofeestatus')
+        .setDescription('View fee balance status across all cases for a user')
+        .addUserOption(option =>
+            option.setName('target')
+                .setDescription('The user to check all fees')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -391,7 +443,11 @@ client.once(Events.ClientReady, async readyClient => {
             hearingCommand.toJSON(),
             noaCommand.toJSON(),
             summonCommand.toJSON(),
-            publicSummonsCommand.toJSON()
+            publicSummonsCommand.toJSON(),
+            imposeFeeCommand.toJSON(),
+            feeStatusCommand.toJSON(),
+            executeFeeCommand.toJSON(),
+            sudoFeeStatusCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
