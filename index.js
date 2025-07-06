@@ -865,6 +865,9 @@ client.on(Events.InteractionCreate, async interaction => {
             // Clean up temp file
             await fs.unlink(filepath);
             
+            // Move channel to archive category without syncing permissions
+            await channel.setParent(ARCHIVE_CATEGORY_ID, { lockPermissions: false });
+            
             // Remove all existing permission overwrites and set new ones
             await channel.permissionOverwrites.set([
                 {
@@ -877,9 +880,6 @@ client.on(Events.InteractionCreate, async interaction => {
                     allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
                 }
             ]);
-            
-            // Move channel to archive category
-            await channel.setParent(ARCHIVE_CATEGORY_ID);
             
             // Send closing message
             const closeEmbed = new EmbedBuilder()
