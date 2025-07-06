@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, Pe
 const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
+const axios = require('axios');
 
 const client = new Client({
     intents: [
@@ -2278,7 +2279,7 @@ You are also required to file your answer or motion with the Clerk of this Court
             if (summonsType === 'criminal') {
                 // Criminal summons with wanted poster PDF
                 const pdfBuffer = await generateWantedPosterPDF(targetUsername, caseChannel.name, interaction.user.username);
-                const attachment = new AttachmentBuilder(pdfBuffer, { name: 'wanted_poster.pdf' });
+                const attachment = new AttachmentBuilder(pdfBuffer, { name: `${targetUsername}-Wanted-Poster.pdf` });
                 
                 // Create embed
                 const embed = new EmbedBuilder()
@@ -3263,8 +3264,41 @@ async function generateMinuteOrderPDF(caseCode, orderId, targetParty, orderText,
     });
 }
 
+async function getRobloxUserAvatar(username) {
+    try {
+        // First, get user ID from username
+        const userResponse = await axios.post('https://users.roblox.com/v1/usernames/users', {
+            usernames: [username],
+            excludeBannedUsers: false
+        });
+        
+        if (!userResponse.data.data || userResponse.data.data.length === 0) {
+            return null;
+        }
+        
+        const userId = userResponse.data.data[0].id;
+        
+        // Get user's avatar headshot
+        const avatarResponse = await axios.get(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=420x420&format=Png&isCircular=false`);
+        
+        if (!avatarResponse.data.data || avatarResponse.data.data.length === 0) {
+            return null;
+        }
+        
+        const imageUrl = avatarResponse.data.data[0].imageUrl;
+        
+        // Download the image
+        const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+        return Buffer.from(imageResponse.data);
+        
+    } catch (error) {
+        console.error('Error fetching Roblox avatar:', error);
+        return null;
+    }
+}
+
 async function generateWantedPosterPDF(targetUsername, caseChannelName, issuedBy) {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
         const doc = new PDFDocument({
             size: 'LETTER',
             margins: {
@@ -3295,37 +3329,59 @@ async function generateWantedPosterPDF(targetUsername, caseChannelName, issuedBy
            .fillColor('#000000')
            .text('BY ORDER OF THE COURT', 0, 170, { align: 'center', width: doc.page.width });
         
-        // Photo placeholder
+        // Photo area
         const photoX = (doc.page.width - 300) / 2;
-        doc.rect(photoX, 220, 300, 300)
-           .lineWidth(2)
-           .stroke('#000000');
+        const photoY = 220;
+        const photoSize = 300;
         
-        doc.rect(photoX, 220, 300, 300)
-           .fill('#EEEEEE');
+        // Try to get Roblox avatar
+        const avatarBuffer = await getRobloxUserAvatar(targetUsername);
         
-        doc.fontSize(24).font('Helvetica-Bold')
-           .fillColor('#666666')
-           .text('PHOTO', 0, 350, { align: 'center', width: doc.page.width });
-        doc.text('UNAVAILABLE', 0, 380, { align: 'center', width: doc.page.width });
+        if (avatarBuffer) {
+            // Add the Roblox avatar image
+            doc.image(avatarBuffer, photoX, photoY, { width: photoSize, height: photoSize });
+            
+            // Add border around image
+            doc.rect(photoX, photoY, photoSize, photoSize)
+               .lineWidth(2)
+               .stroke('#000000');
+        } else {
+            // Photo placeholder if no avatar found
+            doc.rect(photoX, photoY, photoSize, photoSize)
+               .lineWidth(2)
+               .stroke('#000000');
+            
+            doc.rect(photoX, photoY, photoSize, photoSize)
+               .fill('#EEEEEE');
+            
+            doc.fontSize(24).font('Helvetica-Bold')
+               .fillColor('#666666')
+               .text('PHOTO', 0, 350, { align: 'center', width: doc.page.width });
+            doc.text('UNAVAILABLE', 0, 380, { align: 'center', width: doc.page.width });
+        }
         
         // Username
         doc.fontSize(36).font('Helvetica-Bold')
            .fillColor('#000000')
            .text(targetUsername, 0, 550, { align: 'center', width: doc.page.width });
         
-        // Warrant text
-        doc.fontSize(16).font('Helvetica')
+        // Simplified warrant text
+        doc.fontSize(20).font('Helvetica-Bold')
            .fillColor('#000000');
         
         const warrantY = 620;
-        doc.text('A BENCH WARRANT HAS BEEN ISSUED', 60, warrantY);
-        doc.text('FOR FAILURE TO APPEAR', 60, warrantY + 25);
+        doc.text('A BENCH WARRANT HAS BEEN ISSUED', 0, warrantY, { align: 'center', width: doc.page.width });
+        doc.text('BY THE SUPERIOR COURT', 0, warrantY + 30, { align: 'center', width: doc.page.width });
+        
         doc.moveDown();
-        doc.text(`CASE: ${caseChannelName}`, 60);
+        doc.fontSize(18).font('Helvetica')
+           .text(`CASE: ${caseChannelName}`, 0, warrantY + 80, { align: 'center', width: doc.page.width });
+        
         doc.moveDown();
-        doc.text('SURRENDER IMMEDIATELY TO ANY', 60);
-        doc.text('LAW ENFORCEMENT AGENCY', 60);
+        doc.fontSize(22).font('Helvetica-Bold')
+           .fillColor('#8B0000')
+           .text('SURRENDER TO LAW ENFORCEMENT', 0, warrantY + 130, { align: 'center', width: doc.page.width });
+        doc.text('IMMEDIATELY', 0, warrantY + 160, { align: 'center', width: doc.page.width });
         
         // Footer
         doc.fontSize(12).font('Helvetica-Bold')
