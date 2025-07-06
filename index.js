@@ -3,7 +3,6 @@ const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, Pe
 const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
-const { createCanvas } = require('canvas');
 
 const client = new Client({
     intents: [
@@ -2277,84 +2276,15 @@ You are also required to file your answer or motion with the Clerk of this Court
             }
 
             if (summonsType === 'criminal') {
-                // Criminal summons with wanted poster
-                const canvas = createCanvas(800, 1000);
-                const ctx = canvas.getContext('2d');
-                
-                // Background
-                ctx.fillStyle = '#f4e4c1';
-                ctx.fillRect(0, 0, 800, 1000);
-                
-                // Border
-                ctx.strokeStyle = '#8B4513';
-                ctx.lineWidth = 10;
-                ctx.strokeRect(10, 10, 780, 980);
-                
-                // Header - WANTED
-                ctx.fillStyle = '#8B0000';
-                ctx.font = 'bold 120px Arial';
-                ctx.textAlign = 'center';
-                ctx.fillText('WANTED', 400, 120);
-                
-                // Subheader
-                ctx.font = 'bold 40px Arial';
-                ctx.fillText('BY ORDER OF THE COURT', 400, 180);
-                
-                // Photo placeholder
-                ctx.strokeStyle = '#000000';
-                ctx.lineWidth = 3;
-                ctx.strokeRect(200, 220, 400, 400);
-                ctx.fillStyle = '#CCCCCC';
-                ctx.fillRect(200, 220, 400, 400);
-                
-                // "PHOTO UNAVAILABLE" text
-                ctx.fillStyle = '#666666';
-                ctx.font = 'bold 30px Arial';
-                ctx.textAlign = 'center';
-                ctx.fillText('PHOTO', 400, 410);
-                ctx.fillText('UNAVAILABLE', 400, 450);
-                
-                // Username
-                ctx.fillStyle = '#000000';
-                ctx.font = 'bold 50px Arial';
-                ctx.fillText(targetUsername, 400, 680);
-                
-                // Warrant text
-                ctx.font = '25px Arial';
-                ctx.textAlign = 'left';
-                const warrantText = [
-                    'A BENCH WARRANT HAS BEEN ISSUED',
-                    'FOR FAILURE TO APPEAR',
-                    '',
-                    'CASE: ' + caseChannel.name,
-                    '',
-                    'SURRENDER IMMEDIATELY TO ANY',
-                    'LAW ENFORCEMENT AGENCY'
-                ];
-                
-                let yPos = 750;
-                warrantText.forEach(line => {
-                    ctx.fillText(line, 100, yPos);
-                    yPos += 35;
-                });
-                
-                // Footer
-                ctx.textAlign = 'center';
-                ctx.font = 'bold 20px Arial';
-                ctx.fillStyle = '#8B0000';
-                ctx.fillText('ALL LAW ENFORCEMENT OFFICERS AND CERTIFIED', 400, 950);
-                ctx.fillText('BOUNTY AGENTS ARE COMMANDED TO ARREST', 400, 975);
-                
-                // Convert to buffer
-                const buffer = canvas.toBuffer('image/png');
-                const attachment = new AttachmentBuilder(buffer, { name: 'wanted_poster.png' });
+                // Criminal summons with wanted poster PDF
+                const pdfBuffer = await generateWantedPosterPDF(targetUsername, caseChannel.name, interaction.user.username);
+                const attachment = new AttachmentBuilder(pdfBuffer, { name: 'wanted_poster.pdf' });
                 
                 // Create embed
                 const embed = new EmbedBuilder()
                     .setColor(0xFF0000)
                     .setTitle('🚨 CRIMINAL BENCH WARRANT ISSUED 🚨')
-                    .setDescription(`${targetUsername}, A bench warrant has been issued for your arrest in the matter of **${caseChannel.name}**.\n\nYou are commanded to surrender yourself to any law enforcement agency immediately. Failure to do so may result in additional criminal charges.\n\nAll Law Enforcement Officers and certified bounty agents are commanded to arrest the above-named individual and bring them before this court without unnecessary delay.`)
-                    .setImage('attachment://wanted_poster.png')
+                    .setDescription(`${targetUsername}, A bench warrant has been issued for your arrest in the matter of **${caseChannel.name}**.\n\nYou are commanded to surrender yourself to any law enforcement agency immediately. Failure to do so may result in additional criminal charges.\n\nAll Law Enforcement Officers and certified bounty agents are commanded to arrest the above-named individual and bring them before this court without unnecessary delay.\n\n📄 **See attached wanted poster for details**`)
                     .setTimestamp()
                     .setFooter({ text: `Issued by ${interaction.user.username}` });
                 
@@ -3328,6 +3258,85 @@ async function generateMinuteOrderPDF(caseCode, orderId, targetParty, orderText,
         // Footer
         doc.fontSize(9).text('This is an official court document. Any alteration or falsification is a criminal offense.', { align: 'center' });
         doc.text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
+        
+        doc.end();
+    });
+}
+
+async function generateWantedPosterPDF(targetUsername, caseChannelName, issuedBy) {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({
+            size: 'LETTER',
+            margins: {
+                top: 50,
+                bottom: 50,
+                left: 50,
+                right: 50
+            }
+        });
+        
+        const chunks = [];
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        
+        // Border
+        doc.rect(30, 30, doc.page.width - 60, doc.page.height - 60)
+           .lineWidth(5)
+           .stroke('#8B4513');
+        
+        // WANTED header
+        doc.fontSize(72).font('Helvetica-Bold')
+           .fillColor('#8B0000')
+           .text('WANTED', 0, 80, { align: 'center', width: doc.page.width });
+        
+        // Subheader
+        doc.fontSize(24).font('Helvetica-Bold')
+           .fillColor('#000000')
+           .text('BY ORDER OF THE COURT', 0, 170, { align: 'center', width: doc.page.width });
+        
+        // Photo placeholder
+        const photoX = (doc.page.width - 300) / 2;
+        doc.rect(photoX, 220, 300, 300)
+           .lineWidth(2)
+           .stroke('#000000');
+        
+        doc.rect(photoX, 220, 300, 300)
+           .fill('#EEEEEE');
+        
+        doc.fontSize(24).font('Helvetica-Bold')
+           .fillColor('#666666')
+           .text('PHOTO', 0, 350, { align: 'center', width: doc.page.width });
+        doc.text('UNAVAILABLE', 0, 380, { align: 'center', width: doc.page.width });
+        
+        // Username
+        doc.fontSize(36).font('Helvetica-Bold')
+           .fillColor('#000000')
+           .text(targetUsername, 0, 550, { align: 'center', width: doc.page.width });
+        
+        // Warrant text
+        doc.fontSize(16).font('Helvetica')
+           .fillColor('#000000');
+        
+        const warrantY = 620;
+        doc.text('A BENCH WARRANT HAS BEEN ISSUED', 60, warrantY);
+        doc.text('FOR FAILURE TO APPEAR', 60, warrantY + 25);
+        doc.moveDown();
+        doc.text(`CASE: ${caseChannelName}`, 60);
+        doc.moveDown();
+        doc.text('SURRENDER IMMEDIATELY TO ANY', 60);
+        doc.text('LAW ENFORCEMENT AGENCY', 60);
+        
+        // Footer
+        doc.fontSize(12).font('Helvetica-Bold')
+           .fillColor('#8B0000')
+           .text('ALL LAW ENFORCEMENT OFFICERS AND CERTIFIED', 0, doc.page.height - 100, { align: 'center', width: doc.page.width });
+        doc.text('BOUNTY AGENTS ARE COMMANDED TO ARREST', 0, doc.page.height - 80, { align: 'center', width: doc.page.width });
+        
+        // Issue info
+        doc.fontSize(10).font('Helvetica')
+           .fillColor('#666666')
+           .text(`Issued by: ${issuedBy} | Date: ${new Date().toLocaleDateString()}`, 0, doc.page.height - 40, { align: 'center', width: doc.page.width });
         
         doc.end();
     });
