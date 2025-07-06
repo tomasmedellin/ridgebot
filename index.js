@@ -277,6 +277,22 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('Your Ridgeway Bar Number')
                 .setRequired(true));
     
+    const summonCommand = new SlashCommandBuilder()
+        .setName('summon')
+        .setDescription('Issue a legal summons to a user')
+        .addStringOption(option =>
+            option.setName('target')
+                .setDescription('The nickname of the user to summon')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('plaintiff')
+                .setDescription('The plaintiff in the case')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('case_link')
+                .setDescription('Link to the case details')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -298,7 +314,8 @@ client.once(Events.ClientReady, async readyClient => {
             staffInvoiceCommand.toJSON(),
             minuteOrderCommand.toJSON(),
             dejCommand.toJSON(),
-            noaCommand.toJSON()
+            noaCommand.toJSON(),
+            summonCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -2122,6 +2139,97 @@ client.on(Events.InteractionCreate, async interaction => {
             await interaction.editReply({ 
                 content: 'An error occurred while filing the Notice of Appearance.', 
                 flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'summon') {
+        await interaction.deferReply();
+        
+        const targetNickname = interaction.options.getString('target');
+        const plaintiff = interaction.options.getString('plaintiff');
+        const caseLink = interaction.options.getString('case_link');
+        const SERVER_ID = '1348177368451121185';
+        
+        try {
+            // Get the guild
+            const guild = await client.guilds.fetch(SERVER_ID);
+            if (!guild) {
+                await interaction.editReply({
+                    content: 'Unable to access the required server.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Fetch all members to ensure we have the latest data
+            await guild.members.fetch();
+            
+            // Find member with matching nickname (case-insensitive)
+            const targetMember = guild.members.cache.find(member => 
+                member.nickname && member.nickname.toLowerCase() === targetNickname.toLowerCase()
+            );
+            
+            if (!targetMember) {
+                await interaction.editReply({
+                    content: `No user found with the nickname "${targetNickname}" in the server.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Prepare the summons message
+            const currentDate = new Date().toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+            });
+            
+            const summonsMessage = `YOU ARE HEREBY SUMMONED and required to serve upon plaintiff **${plaintiff}** an answer to the complaint which is herewith served upon you, within seven (7) days after service of this summons upon you, exclusive of the day of service. (${currentDate})
+
+IF YOU FAIL TO DO SO, judgment by default will be taken against you for the relief demanded in the complaint.
+
+You are also required to file your answer or motion with the Clerk of this Court within the same time period.
+
+**Case Details:** ${caseLink}`;
+            
+            // Try to send DM
+            try {
+                await targetMember.send(summonsMessage);
+                
+                // Create success embed
+                const successEmbed = new EmbedBuilder()
+                    .setColor(0x00FF00)
+                    .setTitle('⚖️ SUMMONS SERVED')
+                    .setDescription('The legal summons has been successfully served.')
+                    .addFields(
+                        { name: 'Target', value: `${targetMember.user.tag} (${targetNickname})`, inline: true },
+                        { name: 'Plaintiff', value: plaintiff, inline: true },
+                        { name: 'Date Served', value: currentDate, inline: true },
+                        { name: 'Response Due', value: 'Within 7 days', inline: true },
+                        { name: 'Case Link', value: `[View Case](${caseLink})`, inline: false }
+                    )
+                    .setTimestamp()
+                    .setFooter({ text: `Served by ${interaction.user.username}` });
+                
+                await interaction.editReply({
+                    content: 'Summons successfully served via direct message.',
+                    embeds: [successEmbed]
+                });
+                
+            } catch (dmError) {
+                // If DM fails (user has DMs disabled)
+                await interaction.editReply({
+                    content: `Unable to send summons to ${targetMember.user.tag}. They may have DMs disabled or blocked the bot.`,
+                    flags: 64
+                });
+            }
+            
+        } catch (error) {
+            console.error('Error processing summon command:', error);
+            await interaction.editReply({
+                content: 'An error occurred while processing the summons.',
+                flags: 64
             });
         }
     }
