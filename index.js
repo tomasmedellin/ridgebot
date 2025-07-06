@@ -2292,12 +2292,12 @@ You are also required to file your answer or motion with the Clerk of this Court
                 
                 // Header - WANTED
                 ctx.fillStyle = '#8B0000';
-                ctx.font = 'bold 120px serif';
+                ctx.font = 'bold 120px Arial';
                 ctx.textAlign = 'center';
                 ctx.fillText('WANTED', 400, 120);
                 
                 // Subheader
-                ctx.font = 'bold 40px serif';
+                ctx.font = 'bold 40px Arial';
                 ctx.fillText('BY ORDER OF THE COURT', 400, 180);
                 
                 // Photo placeholder
@@ -2309,18 +2309,18 @@ You are also required to file your answer or motion with the Clerk of this Court
                 
                 // "PHOTO UNAVAILABLE" text
                 ctx.fillStyle = '#666666';
-                ctx.font = 'bold 30px serif';
+                ctx.font = 'bold 30px Arial';
                 ctx.textAlign = 'center';
                 ctx.fillText('PHOTO', 400, 410);
                 ctx.fillText('UNAVAILABLE', 400, 450);
                 
                 // Username
                 ctx.fillStyle = '#000000';
-                ctx.font = 'bold 50px serif';
+                ctx.font = 'bold 50px Arial';
                 ctx.fillText(targetUsername, 400, 680);
                 
                 // Warrant text
-                ctx.font = '25px serif';
+                ctx.font = '25px Arial';
                 ctx.textAlign = 'left';
                 const warrantText = [
                     'A BENCH WARRANT HAS BEEN ISSUED',
@@ -2340,7 +2340,7 @@ You are also required to file your answer or motion with the Clerk of this Court
                 
                 // Footer
                 ctx.textAlign = 'center';
-                ctx.font = 'bold 20px serif';
+                ctx.font = 'bold 20px Arial';
                 ctx.fillStyle = '#8B0000';
                 ctx.fillText('ALL LAW ENFORCEMENT OFFICERS AND CERTIFIED', 400, 950);
                 ctx.fillText('BOUNTY AGENTS ARE COMMANDED TO ARREST', 400, 975);
@@ -2360,7 +2360,6 @@ You are also required to file your answer or motion with the Clerk of this Court
                 
                 // Send to notification channel
                 await notificationChannel.send({
-                    content: `<@${targetUsername}>`,
                     embeds: [embed],
                     files: [attachment]
                 });
@@ -2387,7 +2386,6 @@ You are also required to file your answer or motion with the Clerk of this Court
                 
                 // Send to notification channel
                 await notificationChannel.send({
-                    content: `<@${targetUsername}>`,
                     embeds: [embed]
                 });
                 
