@@ -4,6 +4,7 @@ const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAs
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const axios = require('axios');
+const moment = require('moment-timezone');
 
 const client = new Client({
     intents: [
@@ -280,7 +281,26 @@ client.once(Events.ClientReady, async readyClient => {
                     { name: 'Mountain Time (MT)', value: 'America/Denver' },
                     { name: 'Pacific Time (PT)', value: 'America/Los_Angeles' },
                     { name: 'Alaska Time (AKT)', value: 'America/Anchorage' },
-                    { name: 'Hawaii Time (HT)', value: 'Pacific/Honolulu' }
+                    { name: 'Hawaii Time (HT)', value: 'Pacific/Honolulu' },
+                    { name: 'GMT/UTC', value: 'UTC' },
+                    { name: 'British Time (BST/GMT)', value: 'Europe/London' },
+                    { name: 'Central European Time (CET)', value: 'Europe/Paris' },
+                    { name: 'Eastern European Time (EET)', value: 'Europe/Athens' },
+                    { name: 'Moscow Time (MSK)', value: 'Europe/Moscow' },
+                    { name: 'India Standard Time (IST)', value: 'Asia/Kolkata' },
+                    { name: 'China Standard Time (CST)', value: 'Asia/Shanghai' },
+                    { name: 'Japan Standard Time (JST)', value: 'Asia/Tokyo' },
+                    { name: 'Korea Standard Time (KST)', value: 'Asia/Seoul' },
+                    { name: 'Singapore Time (SGT)', value: 'Asia/Singapore' },
+                    { name: 'Australian Eastern Time (AET)', value: 'Australia/Sydney' },
+                    { name: 'Australian Western Time (AWT)', value: 'Australia/Perth' },
+                    { name: 'New Zealand Time (NZST)', value: 'Pacific/Auckland' },
+                    { name: 'Dubai Time (GST)', value: 'Asia/Dubai' },
+                    { name: 'Israel Standard Time (IST)', value: 'Asia/Jerusalem' },
+                    { name: 'South Africa Time (SAST)', value: 'Africa/Johannesburg' },
+                    { name: 'Brazil Time (BRT)', value: 'America/Sao_Paulo' },
+                    { name: 'Argentina Time (ART)', value: 'America/Argentina/Buenos_Aires' },
+                    { name: 'Mexico City Time (CST)', value: 'America/Mexico_City' }
                 ))
         .addStringOption(option =>
             option.setName('location')
@@ -2079,20 +2099,20 @@ client.on(Events.InteractionCreate, async interaction => {
                 return;
             }
             
-            // Parse date and time
-            const [month, day, year] = dateStr.split('/').map(num => parseInt(num));
-            const [time, period] = timeStr.split(' ');
-            let [hours, minutes] = time.split(':').map(num => parseInt(num));
+            // Parse date and time using moment-timezone
+            const dateTimeStr = `${dateStr} ${timeStr}`;
+            const hearingMoment = moment.tz(dateTimeStr, 'MM/DD/YYYY hh:mm A', timezone);
             
-            // Convert to 24-hour format
-            if (period.toUpperCase() === 'PM' && hours !== 12) {
-                hours += 12;
-            } else if (period.toUpperCase() === 'AM' && hours === 12) {
-                hours = 0;
+            if (!hearingMoment.isValid()) {
+                await interaction.editReply({
+                    content: 'Invalid date or time format. Please use MM/DD/YYYY for date and HH:MM AM/PM for time.',
+                    flags: 64
+                });
+                return;
             }
             
-            // Create date object in the specified timezone
-            const hearingDate = new Date(year, month - 1, day, hours, minutes);
+            // Convert to UTC for storage
+            const hearingDate = hearingMoment.toDate();
             
             // Get all assigned parties (judge, clerk, plaintiffs, defendants)
             const assignedParties = [];
@@ -2142,7 +2162,26 @@ client.on(Events.InteractionCreate, async interaction => {
                 'America/Denver': 'Mountain Time (MT)',
                 'America/Los_Angeles': 'Pacific Time (PT)',
                 'America/Anchorage': 'Alaska Time (AKT)',
-                'Pacific/Honolulu': 'Hawaii Time (HT)'
+                'Pacific/Honolulu': 'Hawaii Time (HT)',
+                'UTC': 'GMT/UTC',
+                'Europe/London': 'British Time (BST/GMT)',
+                'Europe/Paris': 'Central European Time (CET)',
+                'Europe/Athens': 'Eastern European Time (EET)',
+                'Europe/Moscow': 'Moscow Time (MSK)',
+                'Asia/Kolkata': 'India Standard Time (IST)',
+                'Asia/Shanghai': 'China Standard Time (CST)',
+                'Asia/Tokyo': 'Japan Standard Time (JST)',
+                'Asia/Seoul': 'Korea Standard Time (KST)',
+                'Asia/Singapore': 'Singapore Time (SGT)',
+                'Australia/Sydney': 'Australian Eastern Time (AET)',
+                'Australia/Perth': 'Australian Western Time (AWT)',
+                'Pacific/Auckland': 'New Zealand Time (NZST)',
+                'Asia/Dubai': 'Dubai Time (GST)',
+                'Asia/Jerusalem': 'Israel Standard Time (IST)',
+                'Africa/Johannesburg': 'South Africa Time (SAST)',
+                'America/Sao_Paulo': 'Brazil Time (BRT)',
+                'America/Argentina/Buenos_Aires': 'Argentina Time (ART)',
+                'America/Mexico_City': 'Mexico City Time (CST)'
             }[timezone] || timezone;
             
             // Create hearing embed
@@ -2151,8 +2190,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 .setTitle('⚖️ HEARING SCHEDULED')
                 .setDescription(`A hearing has been scheduled for case ${caseInfo.case_code}`)
                 .addFields(
-                    { name: 'Date', value: dateStr, inline: true },
-                    { name: 'Time', value: `${timeStr} ${timezoneDisplay}`, inline: true },
+                    { name: 'Date', value: hearingMoment.format('MMMM D, YYYY'), inline: true },
+                    { name: 'Time', value: `${hearingMoment.format('h:mm A')} ${timezoneDisplay}`, inline: true },
                     { name: 'Location', value: locationDisplay, inline: true },
                     { name: 'Type', value: isVirtual ? 'Virtual' : 'In-Person', inline: true },
                     { name: 'Scheduled By', value: `<@${interaction.user.id}>`, inline: true },
@@ -3922,15 +3961,16 @@ async function checkHearingReminders() {
                 
                 if (isOneHourReminder) {
                     // 1 hour reminder
+                    const hearingMoment = moment.tz(hearingDate, hearing.timezone);
                     const embed = new EmbedBuilder()
                         .setColor(0xFFA500)
                         .setTitle('⚖️ HEARING REMINDER - 1 HOUR')
                         .setDescription(`Your hearing is scheduled to begin in 1 hour.`)
                         .addFields(
                             { name: 'Case', value: hearing.case_code, inline: true },
-                            { name: 'Time', value: hearingDate.toLocaleTimeString(), inline: true },
+                            { name: 'Time', value: `${hearingMoment.format('h:mm A')} ${hearingMoment.format('z')}`, inline: true },
                             { name: 'Location', value: hearing.is_virtual ? `Virtual (${hearing.location})` : hearing.location, inline: true },
-                            { name: 'Timezone', value: hearing.timezone, inline: false }
+                            { name: 'Date', value: hearingMoment.format('MMMM D, YYYY'), inline: false }
                         )
                         .setTimestamp()
                         .setFooter({ text: 'Please prepare for your hearing' });
@@ -3948,6 +3988,7 @@ async function checkHearingReminders() {
                     
                 } else if (isStartReminder) {
                     // Hearing start reminder
+                    const hearingMoment = moment.tz(hearingDate, hearing.timezone);
                     const embed = new EmbedBuilder()
                         .setColor(0xFF0000)
                         .setTitle('⚖️ HEARING STARTING NOW')
@@ -3955,6 +3996,7 @@ async function checkHearingReminders() {
                         .addFields(
                             { name: 'Case', value: hearing.case_code, inline: true },
                             { name: 'Location', value: hearing.is_virtual ? `Virtual (${hearing.location})` : hearing.location, inline: true },
+                            { name: 'Time', value: `${hearingMoment.format('h:mm A')} ${hearingMoment.format('z')}`, inline: true },
                             { name: 'Judge', value: `Please wait for the Judge to begin proceedings`, inline: false }
                         )
                         .setTimestamp()
