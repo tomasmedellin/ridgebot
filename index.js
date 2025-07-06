@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, Pe
 const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
+const { createCanvas } = require('canvas');
 
 const client = new Client({
     intents: [
@@ -293,6 +294,26 @@ client.once(Events.ClientReady, async readyClient => {
             option.setName('case_link')
                 .setDescription('Link to the case details')
                 .setRequired(true));
+
+    const publicSummonsCommand = new SlashCommandBuilder()
+        .setName('publicsummons')
+        .setDescription('Issue a public summons (civil or criminal) to a user')
+        .addStringOption(option =>
+            option.setName('type')
+                .setDescription('Type of summons')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Civil', value: 'civil' },
+                    { name: 'Criminal', value: 'criminal' }
+                ))
+        .addStringOption(option =>
+            option.setName('target')
+                .setDescription('The username to summon')
+                .setRequired(true))
+        .addChannelOption(option =>
+            option.setName('case_channel')
+                .setDescription('The case channel')
+                .setRequired(true));
     
     try {
         await readyClient.application.commands.set([
@@ -316,7 +337,8 @@ client.once(Events.ClientReady, async readyClient => {
             minuteOrderCommand.toJSON(),
             dejCommand.toJSON(),
             noaCommand.toJSON(),
-            summonCommand.toJSON()
+            summonCommand.toJSON(),
+            publicSummonsCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -2230,6 +2252,155 @@ You are also required to file your answer or motion with the Clerk of this Court
             console.error('Error processing summon command:', error);
             await interaction.editReply({
                 content: 'An error occurred while processing the summons.',
+                flags: 64
+            });
+        }
+    }
+
+    if (interaction.commandName === 'publicsummons') {
+        await interaction.deferReply();
+        
+        const summonsType = interaction.options.getString('type');
+        const targetUsername = interaction.options.getString('target');
+        const caseChannel = interaction.options.getChannel('case_channel');
+        const NOTIFICATION_CHANNEL_ID = '1352760271084716213';
+        
+        try {
+            // Get the notification channel
+            const notificationChannel = await client.channels.fetch(NOTIFICATION_CHANNEL_ID);
+            if (!notificationChannel) {
+                await interaction.editReply({
+                    content: 'Unable to find the notification channel.',
+                    flags: 64
+                });
+                return;
+            }
+
+            if (summonsType === 'criminal') {
+                // Criminal summons with wanted poster
+                const canvas = createCanvas(800, 1000);
+                const ctx = canvas.getContext('2d');
+                
+                // Background
+                ctx.fillStyle = '#f4e4c1';
+                ctx.fillRect(0, 0, 800, 1000);
+                
+                // Border
+                ctx.strokeStyle = '#8B4513';
+                ctx.lineWidth = 10;
+                ctx.strokeRect(10, 10, 780, 980);
+                
+                // Header - WANTED
+                ctx.fillStyle = '#8B0000';
+                ctx.font = 'bold 120px serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('WANTED', 400, 120);
+                
+                // Subheader
+                ctx.font = 'bold 40px serif';
+                ctx.fillText('BY ORDER OF THE COURT', 400, 180);
+                
+                // Photo placeholder
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(200, 220, 400, 400);
+                ctx.fillStyle = '#CCCCCC';
+                ctx.fillRect(200, 220, 400, 400);
+                
+                // "PHOTO UNAVAILABLE" text
+                ctx.fillStyle = '#666666';
+                ctx.font = 'bold 30px serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('PHOTO', 400, 410);
+                ctx.fillText('UNAVAILABLE', 400, 450);
+                
+                // Username
+                ctx.fillStyle = '#000000';
+                ctx.font = 'bold 50px serif';
+                ctx.fillText(targetUsername, 400, 680);
+                
+                // Warrant text
+                ctx.font = '25px serif';
+                ctx.textAlign = 'left';
+                const warrantText = [
+                    'A BENCH WARRANT HAS BEEN ISSUED',
+                    'FOR FAILURE TO APPEAR',
+                    '',
+                    'CASE: ' + caseChannel.name,
+                    '',
+                    'SURRENDER IMMEDIATELY TO ANY',
+                    'LAW ENFORCEMENT AGENCY'
+                ];
+                
+                let yPos = 750;
+                warrantText.forEach(line => {
+                    ctx.fillText(line, 100, yPos);
+                    yPos += 35;
+                });
+                
+                // Footer
+                ctx.textAlign = 'center';
+                ctx.font = 'bold 20px serif';
+                ctx.fillStyle = '#8B0000';
+                ctx.fillText('ALL LAW ENFORCEMENT OFFICERS AND CERTIFIED', 400, 950);
+                ctx.fillText('BOUNTY AGENTS ARE COMMANDED TO ARREST', 400, 975);
+                
+                // Convert to buffer
+                const buffer = canvas.toBuffer('image/png');
+                const attachment = new AttachmentBuilder(buffer, { name: 'wanted_poster.png' });
+                
+                // Create embed
+                const embed = new EmbedBuilder()
+                    .setColor(0xFF0000)
+                    .setTitle('🚨 CRIMINAL BENCH WARRANT ISSUED 🚨')
+                    .setDescription(`${targetUsername}, A bench warrant has been issued for your arrest in the matter of **${caseChannel.name}**.\n\nYou are commanded to surrender yourself to any law enforcement agency immediately. Failure to do so may result in additional criminal charges.\n\nAll Law Enforcement Officers and certified bounty agents are commanded to arrest the above-named individual and bring them before this court without unnecessary delay.`)
+                    .setImage('attachment://wanted_poster.png')
+                    .setTimestamp()
+                    .setFooter({ text: `Issued by ${interaction.user.username}` });
+                
+                // Send to notification channel
+                await notificationChannel.send({
+                    content: `<@${targetUsername}>`,
+                    embeds: [embed],
+                    files: [attachment]
+                });
+                
+                await interaction.editReply({
+                    content: `Criminal bench warrant has been issued for ${targetUsername} and posted to the public summons channel.`,
+                    embeds: [embed],
+                    files: [attachment]
+                });
+                
+            } else {
+                // Civil summons
+                const embed = new EmbedBuilder()
+                    .setColor(0x0099FF)
+                    .setTitle('⚖️ CIVIL SUMMONS - LEGAL NOTICE ⚖️')
+                    .setDescription(`**SUPERIOR COURT OF RIDGEWAY**\n\n**TO:** ${targetUsername}\n\n**YOU ARE BEING SUED**\n\nYou are hereby notified that a civil action has been filed against you in the Superior Court of Ridgeway.\n\n**CASE:** ${caseChannel.name}\n\n**IMPORTANT NOTICE:**\nYou have **SEVEN (7) DAYS** from first publication of this notice to file a response with the Court or face **DEFAULT JUDGMENT**.\n\nFailure to respond within the prescribed time period may result in judgment being entered against you for the relief demanded in the complaint, which may include monetary damages, injunctive relief, or other remedies sought by the plaintiff.\n\n**YOUR RIGHTS:**\n• You have the right to file an answer to the complaint\n• You have the right to be represented by counsel\n• You have the right to dispute the claims made against you\n• You have the right to assert counterclaims or defenses\n\n**TO RESPOND:**\nFile your answer with the Clerk of Court and serve a copy upon the plaintiff or their attorney within the time limit specified above.`)
+                    .addFields(
+                        { name: 'Response Deadline', value: '7 days from publication', inline: true },
+                        { name: 'Court', value: 'Superior Court of Ridgeway', inline: true },
+                        { name: 'Case', value: caseChannel.name, inline: true }
+                    )
+                    .setTimestamp()
+                    .setFooter({ text: `Published by ${interaction.user.username} | This is a legal notice with legal consequences` });
+                
+                // Send to notification channel
+                await notificationChannel.send({
+                    content: `<@${targetUsername}>`,
+                    embeds: [embed]
+                });
+                
+                await interaction.editReply({
+                    content: `Civil summons has been issued for ${targetUsername} and posted to the public summons channel.`,
+                    embeds: [embed]
+                });
+            }
+            
+        } catch (error) {
+            console.error('Error processing public summons:', error);
+            await interaction.editReply({
+                content: 'An error occurred while processing the public summons.',
                 flags: 64
             });
         }
