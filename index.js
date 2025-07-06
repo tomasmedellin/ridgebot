@@ -319,8 +319,8 @@ client.on(Events.InteractionCreate, async interaction => {
     // Special handling for case party commands - check if user can send messages in channel
     const casePartyCommands = ['appealnotice', 'certiorari', 'financialdisclosure', 'firearmsrelinquishment'];
     
-    // Attorney commands that have their own permission checks
-    const attorneyCommands = ['noa'];
+    // Commands that have their own permission checks
+    const selfPermissionCommands = ['noa', 'staffinvoice'];
     
     if (casePartyCommands.includes(interaction.commandName)) {
         // If user has the allowed role, they can always use these commands
@@ -341,8 +341,8 @@ client.on(Events.InteractionCreate, async interaction => {
             }
             // If they can send messages, they're a case party - let them through
         }
-    } else if (!attorneyCommands.includes(interaction.commandName)) {
-        // For all other commands (except attorney commands), require the allowed role
+    } else if (!selfPermissionCommands.includes(interaction.commandName)) {
+        // For all other commands (except self-permission commands), require the allowed role
         if (!interaction.member.roles.cache.has(ALLOWED_ROLE_ID)) {
             await interaction.reply({ 
                 content: 'You do not have permission to use this bot.', 
@@ -351,7 +351,7 @@ client.on(Events.InteractionCreate, async interaction => {
             return;
         }
     }
-    // Attorney commands will handle their own permission checks
+    // Self-permission commands will handle their own permission checks
     
     if (interaction.commandName === 'discovery') {
         const caseType = interaction.options.getString('case_type');
