@@ -2635,8 +2635,11 @@ You are also required to file your answer or motion with the Clerk of this Court
             const amount = feeAmounts[category];
             const categoryName = feeCategoryNames[category];
             
-            // Generate random invoice number
-            const invoiceNumber = `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+            // Generate random invoice number (max 20 chars)
+            // Use base36 timestamp + 3 digit random for uniqueness
+            const timestamp = Date.now().toString(36).toUpperCase();
+            const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            const invoiceNumber = `INV-${timestamp}-${random}`;
             
             // Create fee invoice in database
             await createFeeInvoice(
