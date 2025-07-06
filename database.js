@@ -228,6 +228,24 @@ async function initializeDatabase() {
             )
         `);
         
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS hearings (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                channel_id VARCHAR(32) NOT NULL,
+                case_code VARCHAR(50) NOT NULL,
+                hearing_date TIMESTAMP NOT NULL,
+                timezone VARCHAR(50) NOT NULL,
+                location TEXT NOT NULL,
+                is_virtual BOOLEAN NOT NULL,
+                assigned_parties TEXT NOT NULL,
+                created_by VARCHAR(32) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                one_hour_reminder_sent BOOLEAN DEFAULT FALSE,
+                start_reminder_sent BOOLEAN DEFAULT FALSE
+            )
+        `);
+        
         console.log('Database initialized successfully');
     } catch (error) {
         console.error('Error initializing database:', error);
@@ -478,6 +496,44 @@ async function updateDEJCheckin(id) {
     return result.rows[0];
 }
 
+async function createHearing(guildId, channelId, caseCode, hearingDate, timezone, location, isVirtual, assignedParties, createdBy) {
+    const query = `
+        INSERT INTO hearings 
+        (guild_id, channel_id, case_code, hearing_date, timezone, location, is_virtual, assigned_parties, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING *
+    `;
+    const values = [guildId, channelId, caseCode, hearingDate, timezone, location, isVirtual, assignedParties, createdBy];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
+async function getUpcomingHearingReminders() {
+    const query = `
+        SELECT * FROM hearings 
+        WHERE (
+            (hearing_date - INTERVAL '1 hour' <= CURRENT_TIMESTAMP AND one_hour_reminder_sent = FALSE)
+            OR 
+            (hearing_date <= CURRENT_TIMESTAMP AND start_reminder_sent = FALSE)
+        )
+        AND hearing_date >= CURRENT_TIMESTAMP - INTERVAL '1 day'
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+}
+
+async function markHearingReminderSent(id, reminderType) {
+    const column = reminderType === 'one_hour' ? 'one_hour_reminder_sent' : 'start_reminder_sent';
+    const query = `
+        UPDATE hearings 
+        SET ${column} = TRUE
+        WHERE id = $1
+        RETURNING *
+    `;
+    const result = await pool.query(query, [id]);
+    return result.rows[0];
+}
+
 module.exports = {
     initializeDatabase,
     createDiscoveryDeadline,
@@ -502,5 +558,8 @@ module.exports = {
     createStaffInvoice,
     createDEJOrder,
     getDEJCheckinsDue,
-    updateDEJCheckin
+    updateDEJCheckin,
+    createHearing,
+    getUpcomingHearingReminders,
+    markHearingReminderSent
 };

@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const axios = require('axios');
@@ -259,6 +259,38 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('Google Drive link to courtesy copy of order')
                 .setRequired(true));
     
+    const hearingCommand = new SlashCommandBuilder()
+        .setName('hearing')
+        .setDescription('Schedule a hearing with reminders')
+        .addStringOption(option =>
+            option.setName('date')
+                .setDescription('Hearing date (MM/DD/YYYY)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('time')
+                .setDescription('Hearing time (HH:MM AM/PM)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('timezone')
+                .setDescription('Timezone')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Eastern Time (ET)', value: 'America/New_York' },
+                    { name: 'Central Time (CT)', value: 'America/Chicago' },
+                    { name: 'Mountain Time (MT)', value: 'America/Denver' },
+                    { name: 'Pacific Time (PT)', value: 'America/Los_Angeles' },
+                    { name: 'Alaska Time (AKT)', value: 'America/Anchorage' },
+                    { name: 'Hawaii Time (HT)', value: 'Pacific/Honolulu' }
+                ))
+        .addStringOption(option =>
+            option.setName('location')
+                .setDescription('Location of the hearing')
+                .setRequired(true))
+        .addBooleanOption(option =>
+            option.setName('virtual')
+                .setDescription('Is this a virtual hearing?')
+                .setRequired(true));
+    
     const noaCommand = new SlashCommandBuilder()
         .setName('noa')
         .setDescription('File a Notice of Appearance')
@@ -336,6 +368,7 @@ client.once(Events.ClientReady, async readyClient => {
             staffInvoiceCommand.toJSON(),
             minuteOrderCommand.toJSON(),
             dejCommand.toJSON(),
+            hearingCommand.toJSON(),
             noaCommand.toJSON(),
             summonCommand.toJSON(),
             publicSummonsCommand.toJSON()
@@ -349,6 +382,7 @@ client.once(Events.ClientReady, async readyClient => {
     setInterval(checkExpiredAppealDeadlines, 60000); // Check every minute for appeal deadlines
     setInterval(checkExpiredERPODeadlines, 60000); // Check every minute for ERPO deadlines
     setInterval(checkDEJCheckins, 60000); // Check every minute for DEJ check-ins
+    setInterval(checkHearingReminders, 60000); // Check every minute for hearing reminders
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -2018,6 +2052,132 @@ client.on(Events.InteractionCreate, async interaction => {
             console.error('Error issuing DEJ order:', error);
             await interaction.editReply({
                 content: 'An error occurred while issuing the DEJ order.',
+                flags: 64
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'hearing') {
+        await interaction.deferReply();
+        
+        const dateStr = interaction.options.getString('date');
+        const timeStr = interaction.options.getString('time');
+        const timezone = interaction.options.getString('timezone');
+        const location = interaction.options.getString('location');
+        const isVirtual = interaction.options.getBoolean('virtual');
+        const channel = interaction.channel;
+        
+        try {
+            // Get case information
+            const caseInfo = await getCaseByChannel(interaction.guildId, channel.id);
+            
+            if (!caseInfo) {
+                await interaction.editReply({
+                    content: 'This command can only be used in an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Parse date and time
+            const [month, day, year] = dateStr.split('/').map(num => parseInt(num));
+            const [time, period] = timeStr.split(' ');
+            let [hours, minutes] = time.split(':').map(num => parseInt(num));
+            
+            // Convert to 24-hour format
+            if (period.toUpperCase() === 'PM' && hours !== 12) {
+                hours += 12;
+            } else if (period.toUpperCase() === 'AM' && hours === 12) {
+                hours = 0;
+            }
+            
+            // Create date object in the specified timezone
+            const hearingDate = new Date(year, month - 1, day, hours, minutes);
+            
+            // Get all assigned parties (judge, clerk, plaintiffs, defendants)
+            const assignedParties = [];
+            
+            // Add judge
+            if (caseInfo.judge_id) {
+                assignedParties.push(caseInfo.judge_id);
+            }
+            
+            // Add clerk if exists
+            if (caseInfo.clerk_id) {
+                assignedParties.push(caseInfo.clerk_id);
+            }
+            
+            // Add plaintiffs
+            if (caseInfo.plaintiff_ids) {
+                const plaintiffIds = caseInfo.plaintiff_ids.split(',').map(id => id.trim());
+                assignedParties.push(...plaintiffIds);
+            }
+            
+            // Add defendants
+            if (caseInfo.defendant_ids) {
+                const defendantIds = caseInfo.defendant_ids.split(',').map(id => id.trim());
+                assignedParties.push(...defendantIds);
+            }
+            
+            // Create hearing in database
+            const hearing = await createHearing(
+                interaction.guildId,
+                channel.id,
+                caseInfo.case_code,
+                hearingDate,
+                timezone,
+                location,
+                isVirtual,
+                assignedParties.join(','),
+                interaction.user.id
+            );
+            
+            // Format location display
+            const locationDisplay = isVirtual ? `Virtual Hearing (${location})` : location;
+            
+            // Create timezone display
+            const timezoneDisplay = {
+                'America/New_York': 'Eastern Time (ET)',
+                'America/Chicago': 'Central Time (CT)',
+                'America/Denver': 'Mountain Time (MT)',
+                'America/Los_Angeles': 'Pacific Time (PT)',
+                'America/Anchorage': 'Alaska Time (AKT)',
+                'Pacific/Honolulu': 'Hawaii Time (HT)'
+            }[timezone] || timezone;
+            
+            // Create hearing embed
+            const hearingEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('⚖️ HEARING SCHEDULED')
+                .setDescription(`A hearing has been scheduled for case ${caseInfo.case_code}`)
+                .addFields(
+                    { name: 'Date', value: dateStr, inline: true },
+                    { name: 'Time', value: `${timeStr} ${timezoneDisplay}`, inline: true },
+                    { name: 'Location', value: locationDisplay, inline: true },
+                    { name: 'Type', value: isVirtual ? 'Virtual' : 'In-Person', inline: true },
+                    { name: 'Scheduled By', value: `<@${interaction.user.id}>`, inline: true },
+                    { name: 'Hearing ID', value: `H-${hearing.id}`, inline: true }
+                )
+                .addFields({
+                    name: 'Reminders',
+                    value: '• You will receive a reminder 1 hour before the hearing\n• You will receive a notification when the hearing starts',
+                    inline: false
+                })
+                .setTimestamp()
+                .setFooter({ text: 'All parties are required to attend' });
+            
+            // Tag all parties
+            const partyTags = assignedParties.map(id => `<@${id}>`).join(' ');
+            
+            await interaction.editReply({
+                content: `${partyTags}\n**HEARING NOTICE:** Please note the scheduled hearing details below.`,
+                embeds: [hearingEmbed]
+            });
+            
+        } catch (error) {
+            console.error('Error scheduling hearing:', error);
+            await interaction.editReply({
+                content: 'An error occurred while scheduling the hearing.',
                 flags: 64
             });
         }
@@ -3744,6 +3904,77 @@ async function checkDEJCheckins() {
         }
     } catch (error) {
         console.error('Error checking DEJ check-ins:', error);
+    }
+}
+
+async function checkHearingReminders() {
+    try {
+        const upcomingHearings = await getUpcomingHearingReminders();
+        
+        for (const hearing of upcomingHearings) {
+            const channel = await client.channels.fetch(hearing.channel_id);
+            if (channel) {
+                const hearingDate = new Date(hearing.hearing_date);
+                const now = new Date();
+                const timeDiff = hearingDate - now;
+                const isOneHourReminder = timeDiff <= 60 * 60 * 1000 && timeDiff > 0 && !hearing.one_hour_reminder_sent;
+                const isStartReminder = timeDiff <= 0 && !hearing.start_reminder_sent;
+                
+                if (isOneHourReminder) {
+                    // 1 hour reminder
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('⚖️ HEARING REMINDER - 1 HOUR')
+                        .setDescription(`Your hearing is scheduled to begin in 1 hour.`)
+                        .addFields(
+                            { name: 'Case', value: hearing.case_code, inline: true },
+                            { name: 'Time', value: hearingDate.toLocaleTimeString(), inline: true },
+                            { name: 'Location', value: hearing.is_virtual ? `Virtual (${hearing.location})` : hearing.location, inline: true },
+                            { name: 'Timezone', value: hearing.timezone, inline: false }
+                        )
+                        .setTimestamp()
+                        .setFooter({ text: 'Please prepare for your hearing' });
+                    
+                    // Tag all parties
+                    const partyIds = hearing.assigned_parties.split(',').filter(id => id.trim());
+                    const partyTags = partyIds.map(id => `<@${id.trim()}>`).join(' ');
+                    
+                    await channel.send({ 
+                        content: `${partyTags}\n**⏰ 1 HOUR HEARING REMINDER**`, 
+                        embeds: [embed] 
+                    });
+                    
+                    await markHearingReminderSent(hearing.id, 'one_hour');
+                    
+                } else if (isStartReminder) {
+                    // Hearing start reminder
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFF0000)
+                        .setTitle('⚖️ HEARING STARTING NOW')
+                        .setDescription(`The scheduled hearing is starting now.`)
+                        .addFields(
+                            { name: 'Case', value: hearing.case_code, inline: true },
+                            { name: 'Location', value: hearing.is_virtual ? `Virtual (${hearing.location})` : hearing.location, inline: true },
+                            { name: 'Judge', value: `Please wait for the Judge to begin proceedings`, inline: false }
+                        )
+                        .setTimestamp()
+                        .setFooter({ text: 'All parties must be present' });
+                    
+                    // Tag all parties
+                    const partyIds = hearing.assigned_parties.split(',').filter(id => id.trim());
+                    const partyTags = partyIds.map(id => `<@${id.trim()}>`).join(' ');
+                    
+                    await channel.send({ 
+                        content: `${partyTags}\n**🔴 HEARING STARTING NOW**`, 
+                        embeds: [embed] 
+                    });
+                    
+                    await markHearingReminderSent(hearing.id, 'start');
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error checking hearing reminders:', error);
     }
 }
 
