@@ -2589,6 +2589,297 @@ You are also required to file your answer or motion with the Clerk of this Court
             });
         }
     }
+    
+    if (interaction.commandName === 'imposefee') {
+        const targetUser = interaction.options.getUser('target');
+        const category = interaction.options.getString('category');
+        
+        try {
+            // Get case info
+            const caseInfo = await getCaseByChannel(interaction.guildId, interaction.channelId);
+            if (!caseInfo) {
+                await interaction.reply({ 
+                    content: 'This channel is not associated with a case. Please use this command in a case channel.', 
+                    flags: 64 
+                });
+                return;
+            }
+            
+            // Fee amounts mapping
+            const feeAmounts = {
+                'initial_civil': 435,
+                'initial_small_claims': 75,
+                'summary_judgement': 500,
+                'general_motion': 100,
+                'frequent_filer': 100,
+                'summons': 75,
+                'summons_publication': 200,
+                'hearing_scheduling': 60,
+                'vehicle_forfeiture': 100,
+                'general_forfeiture': 200
+            };
+            
+            const feeCategoryNames = {
+                'initial_civil': 'Initial Motion Civil Case Cost',
+                'initial_small_claims': 'Initial Motion Small Claims Case',
+                'summary_judgement': 'Summary Judgement Motion',
+                'general_motion': 'General Motion Cost',
+                'frequent_filer': 'Small Claims Frequent Filer Fee',
+                'summons': 'Summons',
+                'summons_publication': 'Summons by Publication',
+                'hearing_scheduling': 'Hearing Scheduling',
+                'vehicle_forfeiture': 'Petition for Vehicle Forfeiture',
+                'general_forfeiture': 'Petition for General Forfeiture'
+            };
+            
+            const amount = feeAmounts[category];
+            const categoryName = feeCategoryNames[category];
+            
+            // Generate random invoice number
+            const invoiceNumber = `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+            
+            // Create fee invoice in database
+            await createFeeInvoice(
+                interaction.guildId,
+                interaction.channelId,
+                caseInfo.case_code,
+                targetUser.id,
+                categoryName,
+                amount,
+                invoiceNumber
+            );
+            
+            // Create embed
+            const embed = new EmbedBuilder()
+                .setColor(0xFF6347)
+                .setTitle('Court Fee Imposed')
+                .setDescription(`A court fee has been imposed on ${targetUser}`)
+                .addFields(
+                    { name: 'Case Code', value: caseInfo.case_code, inline: true },
+                    { name: 'Fee Category', value: categoryName, inline: true },
+                    { name: 'Amount', value: `$${amount.toFixed(2)}`, inline: true },
+                    { name: 'Invoice Number', value: invoiceNumber, inline: true },
+                    { name: 'Status', value: '⏳ Unpaid', inline: true },
+                    { name: 'Imposed By', value: interaction.user.toString(), inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Use /executefee to mark as paid' });
+            
+            await interaction.reply({ embeds: [embed] });
+            
+        } catch (error) {
+            console.error('Error imposing fee:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while imposing the fee.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'feestatus') {
+        const targetUser = interaction.options.getUser('target');
+        
+        try {
+            // Get case info
+            const caseInfo = await getCaseByChannel(interaction.guildId, interaction.channelId);
+            if (!caseInfo) {
+                await interaction.reply({ 
+                    content: 'This channel is not associated with a case. Please use this command in a case channel.', 
+                    flags: 64 
+                });
+                return;
+            }
+            
+            // Get fees for this user in this case
+            const fees = await getFeesByUserAndCase(interaction.guildId, targetUser.id, caseInfo.case_code);
+            
+            if (fees.length === 0) {
+                await interaction.reply({
+                    content: `No fees found for ${targetUser} in case ${caseInfo.case_code}.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Calculate totals
+            const totalFees = fees.reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+            const paidFees = fees.filter(fee => fee.status === 'paid');
+            const unpaidFees = fees.filter(fee => fee.status === 'unpaid');
+            const totalPaid = paidFees.reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+            const totalUnpaid = unpaidFees.reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+            
+            // Create embed
+            const embed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle(`Fee Status for ${targetUser.username}`)
+                .setDescription(`Case: ${caseInfo.case_code}`)
+                .addFields(
+                    { name: 'Total Fees', value: `$${totalFees.toFixed(2)}`, inline: true },
+                    { name: 'Total Paid', value: `$${totalPaid.toFixed(2)}`, inline: true },
+                    { name: 'Balance Due', value: `$${totalUnpaid.toFixed(2)}`, inline: true }
+                )
+                .setTimestamp();
+            
+            // Add fee details
+            if (unpaidFees.length > 0) {
+                const unpaidList = unpaidFees.map(fee => 
+                    `• ${fee.fee_category}: $${parseFloat(fee.amount).toFixed(2)} (${fee.invoice_number})`
+                ).join('\\n');
+                embed.addFields({ name: '❌ Unpaid Fees', value: unpaidList || 'None', inline: false });
+            }
+            
+            if (paidFees.length > 0) {
+                const paidList = paidFees.map(fee => 
+                    `• ${fee.fee_category}: $${parseFloat(fee.amount).toFixed(2)} (${fee.invoice_number})`
+                ).join('\\n');
+                embed.addFields({ name: '✅ Paid Fees', value: paidList || 'None', inline: false });
+            }
+            
+            await interaction.reply({ embeds: [embed] });
+            
+        } catch (error) {
+            console.error('Error checking fee status:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while checking fee status.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'executefee') {
+        const targetUser = interaction.options.getUser('target');
+        const invoiceNumber = interaction.options.getString('invoice');
+        
+        try {
+            // Get the fee by invoice number
+            const fee = await getFeeByInvoiceNumber(interaction.guildId, invoiceNumber);
+            
+            if (!fee) {
+                await interaction.reply({
+                    content: `No fee found with invoice number: ${invoiceNumber}`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            if (fee.user_id !== targetUser.id) {
+                await interaction.reply({
+                    content: `Invoice ${invoiceNumber} does not belong to ${targetUser}.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            if (fee.status === 'paid') {
+                await interaction.reply({
+                    content: `Invoice ${invoiceNumber} has already been paid.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Mark as paid
+            await markFeePaid(interaction.guildId, invoiceNumber, interaction.user.id);
+            
+            // Create confirmation embed
+            const embed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('Fee Payment Executed')
+                .setDescription(`Fee has been marked as paid`)
+                .addFields(
+                    { name: 'Invoice Number', value: invoiceNumber, inline: true },
+                    { name: 'Amount', value: `$${parseFloat(fee.amount).toFixed(2)}`, inline: true },
+                    { name: 'Fee Category', value: fee.fee_category, inline: true },
+                    { name: 'Paid By', value: targetUser.toString(), inline: true },
+                    { name: 'Processed By', value: interaction.user.toString(), inline: true },
+                    { name: 'Status', value: '✅ Paid', inline: true }
+                )
+                .setTimestamp();
+            
+            await interaction.reply({ embeds: [embed] });
+            
+        } catch (error) {
+            console.error('Error executing fee payment:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while executing the fee payment.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'sudofeestatus') {
+        const targetUser = interaction.options.getUser('target');
+        
+        try {
+            // Get all fees for this user across all cases
+            const allFees = await getAllFeesByUser(interaction.guildId, targetUser.id);
+            
+            if (allFees.length === 0) {
+                await interaction.reply({
+                    content: `No fees found for ${targetUser} across any cases.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Group fees by case
+            const feesByCase = {};
+            allFees.forEach(fee => {
+                if (!feesByCase[fee.case_code]) {
+                    feesByCase[fee.case_code] = [];
+                }
+                feesByCase[fee.case_code].push(fee);
+            });
+            
+            // Calculate totals
+            const totalFees = allFees.reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+            const totalPaid = allFees.filter(fee => fee.status === 'paid')
+                .reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+            const totalUnpaid = allFees.filter(fee => fee.status === 'unpaid')
+                .reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+            
+            // Create embed
+            const embed = new EmbedBuilder()
+                .setColor(0xFFD700)
+                .setTitle(`Complete Fee Status for ${targetUser.username}`)
+                .setDescription('Fee summary across all cases')
+                .addFields(
+                    { name: 'Total Fees (All Cases)', value: `$${totalFees.toFixed(2)}`, inline: true },
+                    { name: 'Total Paid', value: `$${totalPaid.toFixed(2)}`, inline: true },
+                    { name: 'Total Balance Due', value: `$${totalUnpaid.toFixed(2)}`, inline: true }
+                )
+                .setTimestamp();
+            
+            // Add breakdown by case
+            for (const [caseCode, fees] of Object.entries(feesByCase)) {
+                const caseTotalFees = fees.reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+                const casePaid = fees.filter(fee => fee.status === 'paid')
+                    .reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+                const caseUnpaid = fees.filter(fee => fee.status === 'unpaid')
+                    .reduce((sum, fee) => sum + parseFloat(fee.amount), 0);
+                
+                const feeList = fees.map(fee => {
+                    const status = fee.status === 'paid' ? '✅' : '❌';
+                    return `${status} ${fee.fee_category}: $${parseFloat(fee.amount).toFixed(2)} (${fee.invoice_number})`;
+                }).join('\\n');
+                
+                embed.addFields({
+                    name: `Case ${caseCode} - Total: $${caseTotalFees.toFixed(2)} (Paid: $${casePaid.toFixed(2)}, Due: $${caseUnpaid.toFixed(2)})`,
+                    value: feeList || 'No fees',
+                    inline: false
+                });
+            }
+            
+            await interaction.reply({ embeds: [embed] });
+            
+        } catch (error) {
+            console.error('Error checking sudo fee status:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while checking fee status across all cases.', 
+                flags: 64 
+            });
+        }
+    }
 });
 
 function generateTranscriptHTML(channel, messages) {
@@ -2796,20 +3087,27 @@ async function checkExpiredDeadlines() {
         const expiredDeadlines = await getExpiredDeadlines();
         
         for (const deadline of expiredDeadlines) {
-            const channel = await client.channels.fetch(deadline.channel_id);
-            if (channel) {
-                const embed = new EmbedBuilder()
-                    .setColor(0xFFFF00)
-                    .setTitle('⚠️ Discovery Deadline Expired')
-                    .setDescription(`The ${deadline.case_type} discovery deadline has expired.`)
-                    .addFields(
-                        { name: 'Case Type', value: deadline.case_type.charAt(0).toUpperCase() + deadline.case_type.slice(1), inline: true },
-                        { name: 'Set on', value: new Date(deadline.created_at).toLocaleString(), inline: true },
-                        { name: 'Expired at', value: new Date(deadline.deadline).toLocaleString(), inline: false }
-                    )
-                    .setTimestamp();
-                
-                await channel.send({ content: `<@${deadline.user_id}>`, embeds: [embed] });
+            try {
+                const channel = await client.channels.fetch(deadline.channel_id);
+                if (channel) {
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFFF00)
+                        .setTitle('⚠️ Discovery Deadline Expired')
+                        .setDescription(`The ${deadline.case_type} discovery deadline has expired.`)
+                        .addFields(
+                            { name: 'Case Type', value: deadline.case_type.charAt(0).toUpperCase() + deadline.case_type.slice(1), inline: true },
+                            { name: 'Set on', value: new Date(deadline.created_at).toLocaleString(), inline: true },
+                            { name: 'Expired at', value: new Date(deadline.deadline).toLocaleString(), inline: false }
+                        )
+                        .setTimestamp();
+                    
+                    await channel.send({ content: `<@${deadline.user_id}>`, embeds: [embed] });
+                    await markAsNotified(deadline.id);
+                }
+            } catch (channelError) {
+                // Channel doesn't exist or bot doesn't have access
+                console.error(`Failed to send discovery deadline notification for deadline ${deadline.id} in channel ${deadline.channel_id}:`, channelError.message);
+                // Mark as notified anyway to prevent repeated attempts
                 await markAsNotified(deadline.id);
             }
         }
@@ -3058,26 +3356,40 @@ async function checkExpiredAppealDeadlines() {
         const expiredAppealDeadlines = await getExpiredAppealDeadlines();
         
         for (const deadline of expiredAppealDeadlines) {
-            const channel = await client.channels.fetch(deadline.channel_id);
-            if (channel) {
-                // Remove access for plaintiff and defendant
-                await channel.permissionOverwrites.delete(deadline.plaintiff_id);
-                await channel.permissionOverwrites.delete(deadline.defendant_id);
-                
-                // Send notification
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF0000)
-                    .setTitle('⚖️ Appeal Notice Period Expired')
-                    .setDescription('The 24-hour Notice of Appeal period has expired.')
-                    .addFields(
-                        { name: 'Result', value: 'Plaintiff and Defendant access has been removed from this channel.', inline: false },
-                        { name: 'Note', value: 'Only the Judge and Clerk retain access to this case.', inline: false }
-                    )
-                    .setTimestamp();
-                
-                await channel.send({ embeds: [embed] });
-                
-                // Mark as processed
+            try {
+                const channel = await client.channels.fetch(deadline.channel_id);
+                if (channel) {
+                    // Remove access for plaintiff and defendant
+                    try {
+                        await channel.permissionOverwrites.delete(deadline.plaintiff_id);
+                    } catch (err) {
+                        console.error(`Failed to remove plaintiff ${deadline.plaintiff_id} access:`, err.message);
+                    }
+                    
+                    try {
+                        await channel.permissionOverwrites.delete(deadline.defendant_id);
+                    } catch (err) {
+                        console.error(`Failed to remove defendant ${deadline.defendant_id} access:`, err.message);
+                    }
+                    
+                    // Send notification
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFF0000)
+                        .setTitle('⚖️ Appeal Notice Period Expired')
+                        .setDescription('The 24-hour Notice of Appeal period has expired.')
+                        .addFields(
+                            { name: 'Result', value: 'Plaintiff and Defendant access has been removed from this channel.', inline: false },
+                            { name: 'Note', value: 'Only the Judge and Clerk retain access to this case.', inline: false }
+                        )
+                        .setTimestamp();
+                    
+                    await channel.send({ embeds: [embed] });
+                }
+            } catch (channelError) {
+                // Channel doesn't exist or bot doesn't have access
+                console.error(`Failed to process appeal deadline for deadline ${deadline.id} in channel ${deadline.channel_id}:`, channelError.message);
+            } finally {
+                // Always mark as processed to prevent repeated attempts
                 await removePartyAccess(deadline.id);
             }
         }
@@ -3416,27 +3728,33 @@ async function checkExpiredERPODeadlines() {
         const expiredOrders = await getExpiredERPOOrders();
         
         for (const order of expiredOrders) {
-            const channel = await client.channels.fetch(order.channel_id);
-            if (channel) {
-                const embed = new EmbedBuilder()
-                    .setColor(0xFF0000)
-                    .setTitle('🚨 ERPO Deadline Expired')
-                    .setDescription(`The 12-hour deadline for ERPO compliance has expired.`)
-                    .addFields(
-                        { name: 'Subject', value: `<@${order.target_user_id}>`, inline: true },
-                        { name: 'Issued By', value: `<@${order.issued_by}>`, inline: true },
-                        { name: 'Case', value: order.case_code, inline: true },
-                        { name: 'Deadline Was', value: new Date(order.deadline).toLocaleString(), inline: false },
-                        { name: 'Status', value: '⚠️ **NON-COMPLIANT** - Subject failed to surrender firearms within the required timeframe.', inline: false },
-                        { name: 'Next Steps', value: 'The court may initiate contempt proceedings or refer to law enforcement for criminal prosecution.', inline: false }
-                    )
-                    .setTimestamp()
-                    .setFooter({ text: 'Automatic notification of non-compliance' });
-                
-                await channel.send({ 
-                    content: `<@${order.issued_by}> <@${order.target_user_id}>`, 
-                    embeds: [embed] 
-                });
+            try {
+                const channel = await client.channels.fetch(order.channel_id);
+                if (channel) {
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFF0000)
+                        .setTitle('🚨 ERPO Deadline Expired')
+                        .setDescription(`The 12-hour deadline for ERPO compliance has expired.`)
+                        .addFields(
+                            { name: 'Subject', value: `<@${order.target_user_id}>`, inline: true },
+                            { name: 'Issued By', value: `<@${order.issued_by}>`, inline: true },
+                            { name: 'Case', value: order.case_code, inline: true },
+                            { name: 'Deadline Was', value: new Date(order.deadline).toLocaleString(), inline: false },
+                            { name: 'Status', value: '⚠️ **NON-COMPLIANT** - Subject failed to surrender firearms within the required timeframe.', inline: false },
+                            { name: 'Next Steps', value: 'The court may initiate contempt proceedings or refer to law enforcement for criminal prosecution.', inline: false }
+                        )
+                        .setTimestamp()
+                        .setFooter({ text: 'Automatic notification of non-compliance' });
+                    
+                    await channel.send({ 
+                        content: `<@${order.issued_by}> <@${order.target_user_id}>`, 
+                        embeds: [embed] 
+                    });
+                }
+            } catch (channelError) {
+                // Channel doesn't exist or bot doesn't have access
+                console.error(`Failed to send ERPO deadline notification for order ${order.id} in channel ${order.channel_id}:`, channelError.message);
+                // Continue processing other orders
             }
         }
     } catch (error) {
@@ -3970,30 +4288,37 @@ async function checkDEJCheckins() {
         const dueCheckins = await getDEJCheckinsDue();
         
         for (const dej of dueCheckins) {
-            const channel = await client.channels.fetch(dej.channel_id);
-            if (channel) {
-                const embed = new EmbedBuilder()
-                    .setColor(0xFFFF00)
-                    .setTitle('⚠️ PROBATION CHECK-IN REQUIRED')
-                    .setDescription(`Probation check-in is now due.`)
-                    .addFields(
-                        { name: 'Probationer', value: `<@${dej.target_user_id}>`, inline: true },
-                        { name: 'Case', value: dej.case_code, inline: true },
-                        { name: 'Check-in #', value: (dej.checkin_count + 1).toString(), inline: true },
-                        { name: 'Last Check-in', value: dej.last_checkin ? new Date(dej.last_checkin).toLocaleDateString() : 'Never', inline: true },
-                        { name: 'Due Date', value: new Date(dej.next_checkin).toLocaleDateString(), inline: true },
-                        { name: 'Status', value: '🔴 OVERDUE', inline: true },
-                        { name: 'Required Action', value: `<@${dej.target_user_id}> must check in immediately with:\n• Confirmation of compliance with all conditions\n• Any issues or concerns\n• Progress updates`, inline: false }
-                    )
-                    .setTimestamp()
-                    .setFooter({ text: 'Failure to check in may result in probation violation' });
-                
-                await channel.send({ 
-                    content: `<@${dej.target_user_id}> **PROBATION CHECK-IN REQUIRED**`, 
-                    embeds: [embed] 
-                });
-                
-                // Update next check-in date
+            try {
+                const channel = await client.channels.fetch(dej.channel_id);
+                if (channel) {
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFFF00)
+                        .setTitle('⚠️ PROBATION CHECK-IN REQUIRED')
+                        .setDescription(`Probation check-in is now due.`)
+                        .addFields(
+                            { name: 'Probationer', value: `<@${dej.target_user_id}>`, inline: true },
+                            { name: 'Case', value: dej.case_code, inline: true },
+                            { name: 'Check-in #', value: (dej.checkin_count + 1).toString(), inline: true },
+                            { name: 'Last Check-in', value: dej.last_checkin ? new Date(dej.last_checkin).toLocaleDateString() : 'Never', inline: true },
+                            { name: 'Due Date', value: new Date(dej.next_checkin).toLocaleDateString(), inline: true },
+                            { name: 'Status', value: '🔴 OVERDUE', inline: true },
+                            { name: 'Required Action', value: `<@${dej.target_user_id}> must check in immediately with:\n• Confirmation of compliance with all conditions\n• Any issues or concerns\n• Progress updates`, inline: false }
+                        )
+                        .setTimestamp()
+                        .setFooter({ text: 'Failure to check in may result in probation violation' });
+                    
+                    await channel.send({ 
+                        content: `<@${dej.target_user_id}> **PROBATION CHECK-IN REQUIRED**`, 
+                        embeds: [embed] 
+                    });
+                    
+                    // Update next check-in date
+                    await updateDEJCheckin(dej.id);
+                }
+            } catch (channelError) {
+                // Channel doesn't exist or bot doesn't have access
+                console.error(`Failed to send DEJ check-in reminder for order ${dej.id} in channel ${dej.channel_id}:`, channelError.message);
+                // Still update the check-in date to prevent spam
                 await updateDEJCheckin(dej.id);
             }
         }
@@ -4007,13 +4332,14 @@ async function checkHearingReminders() {
         const upcomingHearings = await getUpcomingHearingReminders();
         
         for (const hearing of upcomingHearings) {
-            const channel = await client.channels.fetch(hearing.channel_id);
-            if (channel) {
-                const hearingDate = new Date(hearing.hearing_date);
-                const now = new Date();
-                const timeDiff = hearingDate - now;
-                const isOneHourReminder = timeDiff <= 60 * 60 * 1000 && timeDiff > 0 && !hearing.one_hour_reminder_sent;
-                const isStartReminder = timeDiff <= 0 && !hearing.start_reminder_sent;
+            try {
+                const channel = await client.channels.fetch(hearing.channel_id);
+                if (channel) {
+                    const hearingDate = new Date(hearing.hearing_date);
+                    const now = new Date();
+                    const timeDiff = hearingDate - now;
+                    const isOneHourReminder = timeDiff <= 60 * 60 * 1000 && timeDiff > 0 && !hearing.one_hour_reminder_sent;
+                    const isStartReminder = timeDiff <= 0 && !hearing.start_reminder_sent;
                 
                 if (isOneHourReminder) {
                     // 1 hour reminder
@@ -4067,6 +4393,17 @@ async function checkHearingReminders() {
                         embeds: [embed] 
                     });
                     
+                    await markHearingReminderSent(hearing.id, 'start');
+                }
+            }
+            } catch (channelError) {
+                // Channel doesn't exist or bot doesn't have access
+                console.error(`Failed to send hearing reminder for hearing ${hearing.id} in channel ${hearing.channel_id}:`, channelError.message);
+                // Mark as sent anyway to prevent repeated attempts
+                if (hearing.hearing_date - new Date() <= 60 * 60 * 1000 && !hearing.one_hour_reminder_sent) {
+                    await markHearingReminderSent(hearing.id, 'one_hour');
+                }
+                if (hearing.hearing_date - new Date() <= 0 && !hearing.start_reminder_sent) {
                     await markHearingReminderSent(hearing.id, 'start');
                 }
             }
