@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const axios = require('axios');
@@ -158,6 +158,14 @@ client.once(Events.ClientReady, async readyClient => {
         .addUserOption(option =>
             option.setName('user')
                 .setDescription('The user subject to the ERPO')
+                .setRequired(true));
+    
+    const lifterpoCommand = new SlashCommandBuilder()
+        .setName('lifterpo')
+        .setDescription('Lift an Extreme Risk Protection Order')
+        .addUserOption(option =>
+            option.setName('user')
+                .setDescription('The user whose ERPO should be lifted')
                 .setRequired(true));
     
     const firearmsRelinquishmentCommand = new SlashCommandBuilder()
@@ -436,6 +444,7 @@ client.once(Events.ClientReady, async readyClient => {
             certiorariCommand.toJSON(),
             financialDisclosureCommand.toJSON(),
             erpoCommand.toJSON(),
+            lifterpoCommand.toJSON(),
             firearmsRelinquishmentCommand.toJSON(),
             staffInvoiceCommand.toJSON(),
             minuteOrderCommand.toJSON(),
@@ -1559,6 +1568,92 @@ client.on(Events.InteractionCreate, async interaction => {
             console.error('Error issuing ERPO:', error);
             await interaction.editReply({ 
                 content: 'An error occurred while issuing the ERPO.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'lifterpo') {
+        await interaction.deferReply();
+        
+        const targetUser = interaction.options.getUser('user');
+        const channel = interaction.channel;
+        
+        try {
+            // Get case information to extract case code
+            const caseInfo = await getCaseByChannel(interaction.guildId, channel.id);
+            
+            if (!caseInfo) {
+                await interaction.editReply({
+                    content: 'This command can only be used in an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Check if user has permission (must be judge or clerk)
+            if (interaction.user.id !== caseInfo.judge_id && interaction.user.id !== caseInfo.clerk_id) {
+                await interaction.editReply({
+                    content: 'Only the assigned judge or clerk can lift an ERPO.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Find active ERPO for the user
+            const activeERPO = await getActiveERPOByUser(interaction.guildId, channel.id, targetUser.id);
+            
+            if (!activeERPO) {
+                await interaction.editReply({
+                    content: `No active ERPO found for ${targetUser} in this case.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Lift the ERPO
+            await liftERPO(activeERPO.id);
+            
+            // Create success embed
+            const liftEmbed = new EmbedBuilder()
+                .setColor(0x00FF00)
+                .setTitle('✅ ERPO Lifted')
+                .setDescription(`The Extreme Risk Protection Order against ${targetUser} has been lifted.`)
+                .addFields(
+                    { name: 'Subject', value: `${targetUser}`, inline: true },
+                    { name: 'Lifted By', value: `${interaction.user}`, inline: true },
+                    { name: 'Case', value: caseInfo.case_code, inline: true },
+                    { name: 'Original Order Date', value: new Date(activeERPO.created_at).toLocaleString(), inline: false },
+                    { name: 'Status', value: '✅ The ERPO has been successfully lifted and removed from the system.', inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Official court order lifting' });
+            
+            await interaction.editReply({ embeds: [liftEmbed] });
+            
+            // Notify the affected user
+            try {
+                const dmEmbed = new EmbedBuilder()
+                    .setColor(0x00FF00)
+                    .setTitle('✅ ERPO Lifted')
+                    .setDescription('An Extreme Risk Protection Order against you has been lifted.')
+                    .addFields(
+                        { name: 'Case', value: caseInfo.case_code, inline: true },
+                        { name: 'Lifted By', value: `Judge/Clerk`, inline: true },
+                        { name: 'Effect', value: 'The restrictions imposed by the ERPO are no longer in effect.', inline: false }
+                    )
+                    .setTimestamp();
+                
+                await targetUser.send({ embeds: [dmEmbed] });
+            } catch (dmError) {
+                // User has DMs disabled or blocked the bot
+                console.error(`Failed to DM user ${targetUser.id} about lifted ERPO:`, dmError.message);
+            }
+            
+        } catch (error) {
+            console.error('Error lifting ERPO:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while lifting the ERPO.', 
                 flags: 64 
             });
         }
@@ -3753,6 +3848,9 @@ async function checkExpiredERPODeadlines() {
                         content: `<@${order.issued_by}> <@${order.target_user_id}>`, 
                         embeds: [embed] 
                     });
+                    
+                    // Mark this order as notified to prevent duplicate notifications
+                    await markERPODeadlineNotified(order.id);
                 }
             } catch (channelError) {
                 // Channel doesn't exist or bot doesn't have access

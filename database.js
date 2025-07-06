@@ -167,8 +167,21 @@ async function initializeDatabase() {
                 deadline TIMESTAMP NOT NULL,
                 surrendered BOOLEAN DEFAULT FALSE,
                 surrendered_at TIMESTAMP,
-                pdf_receipt_url TEXT
+                pdf_receipt_url TEXT,
+                deadline_notified BOOLEAN DEFAULT FALSE
             )
+        `);
+        
+        // Add deadline_notified column if it doesn't exist
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='erpo_orders' AND column_name='deadline_notified') 
+                THEN
+                    ALTER TABLE erpo_orders ADD COLUMN deadline_notified BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
         `);
         
         await pool.query(`
@@ -438,6 +451,7 @@ async function getExpiredERPOOrders() {
         SELECT * FROM erpo_orders 
         WHERE deadline <= CURRENT_TIMESTAMP 
         AND surrendered = FALSE
+        AND deadline_notified = FALSE
     `;
     const result = await pool.query(query);
     return result.rows;
@@ -451,6 +465,41 @@ async function markERPOSurrendered(id, pdfUrl) {
         RETURNING *
     `;
     const result = await pool.query(query, [id, pdfUrl]);
+    return result.rows[0];
+}
+
+async function getActiveERPOByUser(guildId, channelId, userId) {
+    const query = `
+        SELECT * FROM erpo_orders 
+        WHERE guild_id = $1 
+        AND channel_id = $2 
+        AND target_user_id = $3 
+        AND surrendered = FALSE
+        ORDER BY created_at DESC
+        LIMIT 1
+    `;
+    const result = await pool.query(query, [guildId, channelId, userId]);
+    return result.rows[0];
+}
+
+async function liftERPO(id) {
+    const query = `
+        DELETE FROM erpo_orders 
+        WHERE id = $1
+        RETURNING *
+    `;
+    const result = await pool.query(query, [id]);
+    return result.rows[0];
+}
+
+async function markERPODeadlineNotified(id) {
+    const query = `
+        UPDATE erpo_orders 
+        SET deadline_notified = TRUE
+        WHERE id = $1
+        RETURNING *
+    `;
+    const result = await pool.query(query, [id]);
     return result.rows[0];
 }
 
@@ -623,6 +672,9 @@ module.exports = {
     createERPOOrder,
     getExpiredERPOOrders,
     markERPOSurrendered,
+    getActiveERPOByUser,
+    liftERPO,
+    markERPODeadlineNotified,
     createFirearmsRelinquishment,
     createStaffInvoice,
     createDEJOrder,
