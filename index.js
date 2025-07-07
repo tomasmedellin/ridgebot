@@ -45,12 +45,12 @@ client.once(Events.ClientReady, async readyClient => {
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('plaintiffs')
-                .setDescription('Plaintiff(s) - mention multiple users separated by spaces')
+                .setDescription('Plaintiff(s) - @mentions or usernames separated by spaces')
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('defendants')
-                .setDescription('Defendant(s) - mention multiple users separated by spaces')
-                .setRequired(true))
+                .setDescription('Defendant(s) - @mentions or usernames separated by spaces (optional for "In Re:" cases)')
+                .setRequired(false))
         .addStringOption(option =>
             option.setName('case_link')
                 .setDescription('Link to the case details')
@@ -427,6 +427,10 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('The user to check all fees')
                 .setRequired(true));
     
+    const feeSheetCommand = new SlashCommandBuilder()
+        .setName('feesheet')
+        .setDescription('Display all available court fees and their costs');
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -456,7 +460,8 @@ client.once(Events.ClientReady, async readyClient => {
             imposeFeeCommand.toJSON(),
             feeStatusCommand.toJSON(),
             executeFeeCommand.toJSON(),
-            sudoFeeStatusCommand.toJSON()
+            sudoFeeStatusCommand.toJSON(),
+            feeSheetCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -556,33 +561,71 @@ client.on(Events.InteractionCreate, async interaction => {
         const judge = interaction.options.getUser('judge');
         const clerk = interaction.options.getUser('clerk'); // Optional
         const plaintiffsString = interaction.options.getString('plaintiffs');
-        const defendantsString = interaction.options.getString('defendants');
+        const defendantsString = interaction.options.getString('defendants'); // Can be null for "In Re:" cases
         const caseLink = interaction.options.getString('case_link');
         
         try {
-            // Parse plaintiff and defendant mentions
-            const plaintiffMatches = plaintiffsString.match(/<@!?(\d+)>/g) || [];
-            const defendantMatches = defendantsString.match(/<@!?(\d+)>/g) || [];
+            // Helper function to parse both mentions and regular usernames
+            const parseUserInput = async (inputString) => {
+                if (!inputString) return [];
+                
+                const userIds = [];
+                const tokens = inputString.split(/\s+/);
+                
+                for (const token of tokens) {
+                    // Check if it's a mention
+                    const mentionMatch = token.match(/<@!?(\d+)>/);
+                    if (mentionMatch) {
+                        userIds.push(mentionMatch[1]);
+                    } else if (token.trim()) {
+                        // Treat as username - try to find user by username
+                        try {
+                            const members = await interaction.guild.members.fetch({ query: token, limit: 100 });
+                            const exactMatch = members.find(member => 
+                                member.user.username.toLowerCase() === token.toLowerCase() ||
+                                member.displayName.toLowerCase() === token.toLowerCase()
+                            );
+                            
+                            if (exactMatch) {
+                                userIds.push(exactMatch.id);
+                            } else {
+                                // If no exact match, check for partial matches
+                                const partialMatch = members.first();
+                                if (partialMatch) {
+                                    userIds.push(partialMatch.id);
+                                }
+                            }
+                        } catch (error) {
+                            console.error(`Could not find user: ${token}`, error);
+                        }
+                    }
+                }
+                
+                return userIds;
+            };
             
-            if (plaintiffMatches.length === 0) {
+            // Parse plaintiffs and defendants
+            const plaintiffIds = await parseUserInput(plaintiffsString);
+            const defendantIds = defendantsString ? await parseUserInput(defendantsString) : [];
+            
+            if (plaintiffIds.length === 0) {
                 await interaction.editReply({
-                    content: 'Please mention at least one plaintiff using @mention.',
+                    content: 'Please provide at least one plaintiff (using @mention or username).',
                     flags: 64
                 });
                 return;
             }
             
-            if (defendantMatches.length === 0) {
+            // Check if it's an "In Re:" case (no defendants required)
+            const isInRe = caseCode.toLowerCase().includes('in re') || caseCode.toLowerCase().includes('in re:');
+            
+            if (!isInRe && defendantIds.length === 0) {
                 await interaction.editReply({
-                    content: 'Please mention at least one defendant using @mention.',
+                    content: 'Please provide at least one defendant (using @mention or username), or use "In Re:" in the case code for cases without defendants.',
                     flags: 64
                 });
                 return;
             }
-            
-            // Extract user IDs from mentions
-            const plaintiffIds = plaintiffMatches.map(match => match.replace(/<@!?|>/g, ''));
-            const defendantIds = defendantMatches.map(match => match.replace(/<@!?|>/g, ''));
             
             // Start building permission overwrites
             const permissionOverwrites = [
@@ -640,7 +683,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 judge.id,
                 clerk ? clerk.id : null,
                 plaintiffIds.join(','),
-                defendantIds.join(','),
+                defendantIds.length > 0 ? defendantIds.join(',') : '',
                 caseLink
             );
             
@@ -662,10 +705,20 @@ client.on(Events.InteractionCreate, async interaction => {
             }
             
             embedFields.push(
-                { name: plaintiffIds.length > 1 ? 'Plaintiffs' : 'Plaintiff', value: plaintiffsDisplay, inline: true },
-                { name: defendantIds.length > 1 ? 'Defendants' : 'Defendant', value: defendantsDisplay, inline: true },
-                { name: '\u200B', value: '\u200B', inline: true }
+                { name: plaintiffIds.length > 1 ? 'Plaintiffs' : 'Plaintiff', value: plaintiffsDisplay, inline: true }
             );
+            
+            if (defendantIds.length > 0) {
+                embedFields.push(
+                    { name: defendantIds.length > 1 ? 'Defendants' : 'Defendant', value: defendantsDisplay, inline: true },
+                    { name: '\u200B', value: '\u200B', inline: true }
+                );
+            } else {
+                embedFields.push(
+                    { name: 'Case Type', value: 'In Re', inline: true },
+                    { name: '\u200B', value: '\u200B', inline: true }
+                );
+            }
             
             // Create case information embed
             const caseEmbed = new EmbedBuilder()
@@ -2974,6 +3027,50 @@ You are also required to file your answer or motion with the Clerk of this Court
             console.error('Error checking sudo fee status:', error);
             await interaction.reply({ 
                 content: 'An error occurred while checking fee status across all cases.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'feesheet') {
+        try {
+            // Fee sheet data
+            const feeSheet = [
+                { category: 'Initial Motion Civil Case Cost', amount: 435 },
+                { category: 'Initial Motion Small Claims Case', amount: 75 },
+                { category: 'Summary Judgement Motion', amount: 500 },
+                { category: 'General Motion Cost', amount: 100 },
+                { category: 'Small Claims Frequent Filer Fee', amount: 100 },
+                { category: 'Summons', amount: 75 },
+                { category: 'Summons by Publication', amount: 200 },
+                { category: 'Hearing Scheduling', amount: 60 },
+                { category: 'Petition for Vehicle Forfeiture', amount: 100 },
+                { category: 'Petition for General Forfeiture', amount: 200 }
+            ];
+            
+            // Create embed
+            const embed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('📋 Court Fee Sheet')
+                .setDescription('Complete list of court fees that can be imposed using `/imposefee`')
+                .setTimestamp()
+                .setFooter({ text: 'Use /imposefee to apply these fees to a user' });
+            
+            // Add fee categories
+            feeSheet.forEach(fee => {
+                embed.addFields({
+                    name: fee.category,
+                    value: `**$${fee.amount.toFixed(2)}**`,
+                    inline: true
+                });
+            });
+            
+            await interaction.reply({ embeds: [embed] });
+            
+        } catch (error) {
+            console.error('Error displaying fee sheet:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while displaying the fee sheet.', 
                 flags: 64 
             });
         }
