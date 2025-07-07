@@ -48,13 +48,13 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('Plaintiff(s) - @mentions or usernames separated by spaces')
                 .setRequired(true))
         .addStringOption(option =>
-            option.setName('defendants')
-                .setDescription('Defendant(s) - @mentions or usernames separated by spaces (optional for "In Re:" cases)')
-                .setRequired(false))
-        .addStringOption(option =>
             option.setName('case_link')
                 .setDescription('Link to the case details')
                 .setRequired(true))
+        .addStringOption(option =>
+            option.setName('defendants')
+                .setDescription('Defendant(s) - @mentions or usernames separated by spaces (optional for "In Re:" cases)')
+                .setRequired(false))
         .addUserOption(option =>
             option.setName('clerk')
                 .setDescription('The assigned clerk (optional)')
@@ -567,9 +567,10 @@ client.on(Events.InteractionCreate, async interaction => {
         try {
             // Helper function to parse both mentions and regular usernames
             const parseUserInput = async (inputString) => {
-                if (!inputString) return [];
+                if (!inputString) return { userIds: [], usernames: [] };
                 
                 const userIds = [];
+                const usernames = [];
                 const tokens = inputString.split(/\s+/);
                 
                 for (const token of tokens) {
@@ -589,26 +590,29 @@ client.on(Events.InteractionCreate, async interaction => {
                             if (exactMatch) {
                                 userIds.push(exactMatch.id);
                             } else {
-                                // If no exact match, check for partial matches
-                                const partialMatch = members.first();
-                                if (partialMatch) {
-                                    userIds.push(partialMatch.id);
-                                }
+                                // If no Discord user found, store as plain username
+                                usernames.push(token);
                             }
                         } catch (error) {
-                            console.error(`Could not find user: ${token}`, error);
+                            // If fetch fails, store as plain username
+                            usernames.push(token);
                         }
                     }
                 }
                 
-                return userIds;
+                return { userIds, usernames };
             };
             
             // Parse plaintiffs and defendants
-            const plaintiffIds = await parseUserInput(plaintiffsString);
-            const defendantIds = defendantsString ? await parseUserInput(defendantsString) : [];
+            const plaintiffResult = await parseUserInput(plaintiffsString);
+            const defendantResult = defendantsString ? await parseUserInput(defendantsString) : { userIds: [], usernames: [] };
             
-            if (plaintiffIds.length === 0) {
+            const plaintiffIds = plaintiffResult.userIds;
+            const plaintiffUsernames = plaintiffResult.usernames;
+            const defendantIds = defendantResult.userIds;
+            const defendantUsernames = defendantResult.usernames;
+            
+            if (plaintiffIds.length === 0 && plaintiffUsernames.length === 0) {
                 await interaction.editReply({
                     content: 'Please provide at least one plaintiff (using @mention or username).',
                     flags: 64
@@ -616,16 +620,7 @@ client.on(Events.InteractionCreate, async interaction => {
                 return;
             }
             
-            // Check if it's an "In Re:" case (no defendants required)
-            const isInRe = caseCode.toLowerCase().includes('in re') || caseCode.toLowerCase().includes('in re:');
-            
-            if (!isInRe && defendantIds.length === 0) {
-                await interaction.editReply({
-                    content: 'Please provide at least one defendant (using @mention or username), or use "In Re:" in the case code for cases without defendants.',
-                    flags: 64
-                });
-                return;
-            }
+            // Defendants are now always optional
             
             // Start building permission overwrites
             const permissionOverwrites = [
@@ -675,21 +670,30 @@ client.on(Events.InteractionCreate, async interaction => {
                 permissionOverwrites: permissionOverwrites
             });
             
-            // Save case to database (store IDs as comma-separated strings)
+            // Save case to database (store IDs and usernames as comma-separated strings)
+            // For database, store both IDs and plain usernames
+            const plaintiffsForDb = [...plaintiffIds, ...plaintiffUsernames].join(',');
+            const defendantsForDb = [...defendantIds, ...defendantUsernames].join(',');
+            
             await createCase(
                 interaction.guildId,
                 channel.id,
                 caseCode,
                 judge.id,
                 clerk ? clerk.id : null,
-                plaintiffIds.join(','),
-                defendantIds.length > 0 ? defendantIds.join(',') : '',
+                plaintiffsForDb,
+                defendantsForDb,
                 caseLink
             );
             
             // Create plaintiffs and defendants display strings
-            const plaintiffsDisplay = plaintiffIds.map(id => `<@${id}>`).join(', ');
-            const defendantsDisplay = defendantIds.map(id => `<@${id}>`).join(', ');
+            const plaintiffMentions = plaintiffIds.map(id => `<@${id}>`);
+            const allPlaintiffs = [...plaintiffMentions, ...plaintiffUsernames];
+            const plaintiffsDisplay = allPlaintiffs.join(', ');
+            
+            const defendantMentions = defendantIds.map(id => `<@${id}>`);
+            const allDefendants = [...defendantMentions, ...defendantUsernames];
+            const defendantsDisplay = allDefendants.join(', ');
             
             // Build fields for the embed
             const embedFields = [
@@ -705,17 +709,17 @@ client.on(Events.InteractionCreate, async interaction => {
             }
             
             embedFields.push(
-                { name: plaintiffIds.length > 1 ? 'Plaintiffs' : 'Plaintiff', value: plaintiffsDisplay, inline: true }
+                { name: allPlaintiffs.length > 1 ? 'Plaintiffs' : 'Plaintiff', value: plaintiffsDisplay, inline: true }
             );
             
-            if (defendantIds.length > 0) {
+            if (allDefendants.length > 0) {
                 embedFields.push(
-                    { name: defendantIds.length > 1 ? 'Defendants' : 'Defendant', value: defendantsDisplay, inline: true },
+                    { name: allDefendants.length > 1 ? 'Defendants' : 'Defendant', value: defendantsDisplay, inline: true },
                     { name: '\u200B', value: '\u200B', inline: true }
                 );
             } else {
                 embedFields.push(
-                    { name: 'Case Type', value: 'In Re', inline: true },
+                    { name: 'Defendants', value: 'None', inline: true },
                     { name: '\u200B', value: '\u200B', inline: true }
                 );
             }
