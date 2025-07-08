@@ -432,8 +432,8 @@ client.once(Events.ClientReady, async readyClient => {
         .setName('feesheet')
         .setDescription('Display all available court fees and their costs');
     
-    const s100Command = new SlashCommandBuilder()
-        .setName('s100')
+    const fileSmallClaimCommand = new SlashCommandBuilder()
+        .setName('filesmallclaim')
         .setDescription('Get the Small Claims form (S100) and filing instructions');
     
     try {
@@ -467,7 +467,7 @@ client.once(Events.ClientReady, async readyClient => {
             executeFeeCommand.toJSON(),
             sudoFeeStatusCommand.toJSON(),
             feeSheetCommand.toJSON(),
-            s100Command.toJSON()
+            fileSmallClaimCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -3086,7 +3086,7 @@ You are also required to file your answer or motion with the Clerk of this Court
         }
     }
     
-    if (interaction.commandName === 's100') {
+    if (interaction.commandName === 'filesmallclaim') {
         try {
             // Load the empty S100 PDF
             const pdfBytes = await fs.readFile('./RW S100.pdf');
