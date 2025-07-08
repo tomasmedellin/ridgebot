@@ -3211,19 +3211,19 @@ You are also required to file your answer or motion with the Clerk of this Court
                 
                 // Add text to show the answers for radio questions
                 // These are approximations - would need exact coordinates from PDF analysis
-                firstPage.drawText(askedPayment ? '✓ Yes' : '✓ No', {
+                firstPage.drawText(askedPayment ? 'X Yes' : 'X No', {
                     x: 100,
                     y: height - 400,
                     size: 12,
                 });
                 
-                firstPage.drawText(filed12Claims ? '✓ Yes' : '✓ No', {
+                firstPage.drawText(filed12Claims ? 'X Yes' : 'X No', {
                     x: 100,
                     y: height - 450,
                     size: 12,
                 });
                 
-                firstPage.drawText(over2500 ? '✓ Yes' : '✓ No', {
+                firstPage.drawText(over2500 ? 'X Yes' : 'X No', {
                     x: 100,
                     y: height - 500,
                     size: 12,
