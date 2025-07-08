@@ -431,6 +431,46 @@ client.once(Events.ClientReady, async readyClient => {
         .setName('feesheet')
         .setDescription('Display all available court fees and their costs');
     
+    const s100Command = new SlashCommandBuilder()
+        .setName('s100')
+        .setDescription('Generate a Small Claims form (S100)')
+        .addStringOption(option =>
+            option.setName('defendant_username')
+                .setDescription('Who are you suing?')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('defendant_discord')
+                .setDescription('What is their Discord?')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('plaintiff_username')
+                .setDescription('What is your Username?')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('plaintiff_discord')
+                .setDescription('What is your Discord?')
+                .setRequired(true))
+        .addNumberOption(option =>
+            option.setName('amount_owed')
+                .setDescription('How much money do you claim the Defendant owes you?')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('date_happened')
+                .setDescription('When did this happen? (MM/DD/YYYY)')
+                .setRequired(true))
+        .addBooleanOption(option =>
+            option.setName('asked_payment')
+                .setDescription('Have you asked the defendant to pay you?')
+                .setRequired(true))
+        .addBooleanOption(option =>
+            option.setName('filed_12_claims')
+                .setDescription('Have you filed more than 12 other small claims within the last 12 months in Ridgeway?')
+                .setRequired(true))
+        .addBooleanOption(option =>
+            option.setName('over_2500')
+                .setDescription('Is your claim for more than $2,500?')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -461,7 +501,8 @@ client.once(Events.ClientReady, async readyClient => {
             feeStatusCommand.toJSON(),
             executeFeeCommand.toJSON(),
             sudoFeeStatusCommand.toJSON(),
-            feeSheetCommand.toJSON()
+            feeSheetCommand.toJSON(),
+            s100Command.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -3075,6 +3116,108 @@ You are also required to file your answer or motion with the Clerk of this Court
             console.error('Error displaying fee sheet:', error);
             await interaction.reply({ 
                 content: 'An error occurred while displaying the fee sheet.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 's100') {
+        try {
+            await interaction.deferReply();
+            
+            // Get all the form data from the command options
+            const defendantUsername = interaction.options.getString('defendant_username');
+            const defendantDiscord = interaction.options.getString('defendant_discord');
+            const plaintiffUsername = interaction.options.getString('plaintiff_username');
+            const plaintiffDiscord = interaction.options.getString('plaintiff_discord');
+            const amountOwed = interaction.options.getNumber('amount_owed');
+            const dateHappened = interaction.options.getString('date_happened');
+            const askedPayment = interaction.options.getBoolean('asked_payment');
+            const filed12Claims = interaction.options.getBoolean('filed_12_claims');
+            const over2500 = interaction.options.getBoolean('over_2500');
+            
+            // Generate current date for form
+            const currentDate = new Date().toLocaleDateString('en-US');
+            
+            // Create PDF document
+            const doc = new PDFDocument();
+            const chunks = [];
+            
+            doc.on('data', chunk => chunks.push(chunk));
+            doc.on('end', async () => {
+                const pdfBuffer = Buffer.concat(chunks);
+                const attachment = new AttachmentBuilder(pdfBuffer, { 
+                    name: `S100-${plaintiffUsername}-vs-${defendantUsername}-${Date.now()}.pdf` 
+                });
+                
+                // Create embed with form summary
+                const embed = new EmbedBuilder()
+                    .setColor(0x0099FF)
+                    .setTitle('📋 Small Claims Form S100')
+                    .setDescription('Your Small Claims form has been generated.')
+                    .addFields(
+                        { name: 'Plaintiff', value: `${plaintiffUsername} (${plaintiffDiscord})`, inline: true },
+                        { name: 'Defendant', value: `${defendantUsername} (${defendantDiscord})`, inline: true },
+                        { name: 'Amount Claimed', value: `$${amountOwed.toFixed(2)}`, inline: true },
+                        { name: 'Date of Incident', value: dateHappened, inline: true },
+                        { name: 'Asked for Payment', value: askedPayment ? 'Yes' : 'No', inline: true },
+                        { name: 'Filed 12+ Claims', value: filed12Claims ? 'Yes' : 'No', inline: true },
+                        { name: 'Over $2,500', value: over2500 ? 'Yes' : 'No', inline: true },
+                        { name: 'Date Filed', value: currentDate, inline: true }
+                    )
+                    .setTimestamp()
+                    .setFooter({ text: 'Small Claims Court Form S100' });
+                
+                await interaction.editReply({
+                    embeds: [embed],
+                    files: [attachment]
+                });
+            });
+            
+            // Generate PDF content
+            doc.fontSize(20).text('SMALL CLAIMS FORM S100', { align: 'center' });
+            doc.moveDown();
+            
+            doc.fontSize(16).text('PLAINTIFF INFORMATION', { underline: true });
+            doc.fontSize(12);
+            doc.text(`PlaintiffUsername1: ${plaintiffUsername}`);
+            doc.text(`Discord_2: ${plaintiffDiscord}`);
+            doc.moveDown();
+            
+            doc.fontSize(16).text('DEFENDANT INFORMATION', { underline: true });
+            doc.fontSize(12);
+            doc.text(`DefendantUsername1: ${defendantUsername}`);
+            doc.text(`Discord2: ${defendantDiscord}`);
+            doc.moveDown();
+            
+            doc.fontSize(16).text('CLAIM DETAILS', { underline: true });
+            doc.fontSize(12);
+            doc.text(`Amount Claimed (plaintiffmoney): $${amountOwed.toFixed(2)}`);
+            doc.text(`Date of Incident (DateQuePaso): ${dateHappened}`);
+            doc.moveDown();
+            
+            doc.fontSize(16).text('CERTIFICATION', { underline: true });
+            doc.fontSize(12);
+            doc.text(`Asked for Payment: [${askedPayment ? 'X' : ' '}] Yes  [${!askedPayment ? 'X' : ' '}] No`);
+            doc.text(`Filed more than 12 claims in last 12 months: [${filed12Claims ? 'X' : ' '}] Yes_2  [${!filed12Claims ? 'X' : ' '}] No_2`);
+            doc.text(`Claim is for more than $2,500: [${over2500 ? 'X' : ' '}] Yes_3  [${!over2500 ? 'X' : ' '}] No_3`);
+            doc.moveDown();
+            
+            doc.fontSize(16).text('SIGNATURE', { underline: true });
+            doc.fontSize(12);
+            doc.text(`SignDate1: ${currentDate}`);
+            doc.text(`DateDos: ${plaintiffUsername}`);
+            doc.text(`pleasesignhereco: /s/ ${plaintiffUsername}`);
+            
+            doc.end();
+            
+        } catch (error) {
+            console.error('Error generating S100 form:', error);
+            const errorMessage = interaction.deferred || interaction.replied 
+                ? 'editReply' 
+                : 'reply';
+            await interaction[errorMessage]({ 
+                content: 'An error occurred while generating the S100 form.', 
                 flags: 64 
             });
         }
