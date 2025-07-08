@@ -3098,48 +3098,48 @@ You are also required to file your answer or motion with the Clerk of this Court
             
             // Create embed with instructions
             const embed = new EmbedBuilder()
-                .setColor(0x0099FF)
-                .setTitle('📋 Small Claims Form S100')
-                .setDescription('**How to file a Small Claims Court Case:**')
+                .setColor(0x000000)
+                .setTitle('SMALL CLAIMS COURT - FORM S100')
+                .setDescription('**INSTRUCTIONS FOR FILING A SMALL CLAIMS ACTION**')
                 .addFields(
                     { 
-                        name: 'Step 1', 
-                        value: 'Fill out this form completely', 
+                        name: 'STEP 1 - COMPLETE FORM', 
+                        value: 'Complete all required fields on Form S100. Ensure all information is accurate and legible.', 
                         inline: false 
                     },
                     { 
-                        name: 'Step 2', 
-                        value: 'Download the completed form', 
+                        name: 'STEP 2 - SAVE DOCUMENT', 
+                        value: 'Download and save the completed form to your device.', 
                         inline: false 
                     },
                     { 
-                        name: 'Step 3', 
-                        value: 'Go to https://rwcourts.org/file-at-home', 
+                        name: 'STEP 3 - ACCESS FILING SYSTEM', 
+                        value: 'Navigate to the Ridgeway Courts electronic filing portal at https://rwcourts.org/file-at-home', 
                         inline: false 
                     },
                     { 
-                        name: 'Step 4', 
-                        value: 'Initialize a new case', 
+                        name: 'STEP 4 - INITIATE CASE', 
+                        value: 'Select "Initialize New Case" from the main menu.', 
                         inline: false 
                     },
                     { 
-                        name: 'Step 5', 
-                        value: 'Select **Stationhouse Courtroom**', 
+                        name: 'STEP 5 - SELECT VENUE', 
+                        value: 'Choose "Stationhouse Courtroom" as the designated venue.', 
                         inline: false 
                     },
                     { 
-                        name: 'Step 6', 
-                        value: 'Select **Small Claims** case type', 
+                        name: 'STEP 6 - CASE TYPE DESIGNATION', 
+                        value: 'Select "Small Claims" from the case type dropdown menu.', 
                         inline: false 
                     },
                     { 
-                        name: 'Step 7', 
-                        value: 'Fill out the rest of the fields and submit', 
+                        name: 'STEP 7 - COMPLETE FILING', 
+                        value: 'Complete all remaining required fields and submit your filing. You will receive a confirmation number upon successful submission.', 
                         inline: false 
                     }
                 )
                 .setTimestamp()
-                .setFooter({ text: 'Small Claims Court Filing Instructions' });
+                .setFooter({ text: 'Superior Court of Ridgeway - Small Claims Division' });
             
             await interaction.reply({
                 embeds: [embed],
