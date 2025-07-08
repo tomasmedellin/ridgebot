@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, Pe
 const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
+const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
 const axios = require('axios');
 const moment = require('moment-timezone');
 
@@ -3139,77 +3140,107 @@ You are also required to file your answer or motion with the Clerk of this Court
             // Generate current date for form
             const currentDate = new Date().toLocaleDateString('en-US');
             
-            // Create PDF document
-            const doc = new PDFDocument();
-            const chunks = [];
+            // Load the existing S100 PDF
+            const existingPdfBytes = await fs.readFile('./RW S100.pdf');
+            const pdfDoc = await PDFLib.load(existingPdfBytes);
             
-            doc.on('data', chunk => chunks.push(chunk));
-            doc.on('end', async () => {
-                const pdfBuffer = Buffer.concat(chunks);
-                const attachment = new AttachmentBuilder(pdfBuffer, { 
-                    name: `S100-${plaintiffUsername}-vs-${defendantUsername}-${Date.now()}.pdf` 
-                });
-                
-                // Create embed with form summary
-                const embed = new EmbedBuilder()
-                    .setColor(0x0099FF)
-                    .setTitle('📋 Small Claims Form S100')
-                    .setDescription('Your Small Claims form has been generated.')
-                    .addFields(
-                        { name: 'Plaintiff', value: `${plaintiffUsername} (${plaintiffDiscord})`, inline: true },
-                        { name: 'Defendant', value: `${defendantUsername} (${defendantDiscord})`, inline: true },
-                        { name: 'Amount Claimed', value: `$${amountOwed.toFixed(2)}`, inline: true },
-                        { name: 'Date of Incident', value: dateHappened, inline: true },
-                        { name: 'Asked for Payment', value: askedPayment ? 'Yes' : 'No', inline: true },
-                        { name: 'Filed 12+ Claims', value: filed12Claims ? 'Yes' : 'No', inline: true },
-                        { name: 'Over $2,500', value: over2500 ? 'Yes' : 'No', inline: true },
-                        { name: 'Date Filed', value: currentDate, inline: true }
-                    )
-                    .setTimestamp()
-                    .setFooter({ text: 'Small Claims Court Form S100' });
-                
-                await interaction.editReply({
-                    embeds: [embed],
-                    files: [attachment]
-                });
+            // Get the form from the PDF
+            const form = pdfDoc.getForm();
+            
+            // Fill the form fields
+            // Defendant information
+            const defendantUsernameField = form.getTextField('DefendantUsername1');
+            defendantUsernameField.setText(defendantUsername);
+            
+            const defendantDiscordField = form.getTextField('Discord2');
+            defendantDiscordField.setText(defendantDiscord);
+            
+            // Plaintiff information
+            const plaintiffUsernameField = form.getTextField('PlaintiffUsername1');
+            plaintiffUsernameField.setText(plaintiffUsername);
+            
+            const plaintiffDiscordField = form.getTextField('Discord_2');
+            plaintiffDiscordField.setText(plaintiffDiscord);
+            
+            // Amount owed
+            const amountField = form.getTextField('plaintiffmoney');
+            amountField.setText(amountOwed.toString());
+            
+            // Date when it happened
+            const dateField = form.getTextField('DateQuePaso');
+            dateField.setText(dateHappened);
+            
+            // Checkboxes
+            // Asked for payment
+            if (askedPayment) {
+                const yesCheckbox = form.getCheckBox('Yes');
+                yesCheckbox.check();
+            } else {
+                const noCheckbox = form.getCheckBox('No');
+                noCheckbox.check();
+            }
+            
+            // Filed 12+ claims
+            if (filed12Claims) {
+                const yes2Checkbox = form.getCheckBox('Yes_2');
+                yes2Checkbox.check();
+            } else {
+                const no2Checkbox = form.getCheckBox('No_2');
+                no2Checkbox.check();
+            }
+            
+            // Over $2,500
+            if (over2500) {
+                const yes3Checkbox = form.getCheckBox('Yes_3');
+                yes3Checkbox.check();
+            } else {
+                const no3Checkbox = form.getCheckBox('No_3');
+                no3Checkbox.check();
+            }
+            
+            // Auto-fill fields
+            // Sign date
+            const signDateField = form.getTextField('SignDate1');
+            signDateField.setText(currentDate);
+            
+            // DateDos (filled with plaintiff username)
+            const dateDosField = form.getTextField('DateDos');
+            dateDosField.setText(plaintiffUsername);
+            
+            // Signature (pleasesignhereco)
+            const signatureField = form.getTextField('pleasesignhereco');
+            signatureField.setText(plaintiffUsername);
+            
+            // Save the filled PDF
+            const pdfBytes = await pdfDoc.save();
+            
+            // Create attachment
+            const attachment = new AttachmentBuilder(Buffer.from(pdfBytes), { 
+                name: `S100-${plaintiffUsername}-vs-${defendantUsername}-${Date.now()}.pdf` 
             });
             
-            // Generate PDF content
-            doc.fontSize(20).text('SMALL CLAIMS FORM S100', { align: 'center' });
-            doc.moveDown();
+            // Create embed with form summary
+            const embed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('📋 Small Claims Form S100')
+                .setDescription('Your Small Claims form has been filled and generated.')
+                .addFields(
+                    { name: 'Plaintiff', value: `${plaintiffUsername} (${plaintiffDiscord})`, inline: true },
+                    { name: 'Defendant', value: `${defendantUsername} (${defendantDiscord})`, inline: true },
+                    { name: 'Amount Claimed', value: `$${amountOwed.toFixed(2)}`, inline: true },
+                    { name: 'Date of Incident', value: dateHappened, inline: true },
+                    { name: 'Asked for Payment', value: askedPayment ? 'Yes' : 'No', inline: true },
+                    { name: 'Filed 12+ Claims', value: filed12Claims ? 'Yes' : 'No', inline: true },
+                    { name: 'Over $2,500', value: over2500 ? 'Yes' : 'No', inline: true },
+                    { name: 'Date Filed', value: currentDate, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Small Claims Court Form S100' });
             
-            doc.fontSize(16).text('PLAINTIFF INFORMATION', { underline: true });
-            doc.fontSize(12);
-            doc.text(`PlaintiffUsername1: ${plaintiffUsername}`);
-            doc.text(`Discord_2: ${plaintiffDiscord}`);
-            doc.moveDown();
-            
-            doc.fontSize(16).text('DEFENDANT INFORMATION', { underline: true });
-            doc.fontSize(12);
-            doc.text(`DefendantUsername1: ${defendantUsername}`);
-            doc.text(`Discord2: ${defendantDiscord}`);
-            doc.moveDown();
-            
-            doc.fontSize(16).text('CLAIM DETAILS', { underline: true });
-            doc.fontSize(12);
-            doc.text(`Amount Claimed (plaintiffmoney): $${amountOwed.toFixed(2)}`);
-            doc.text(`Date of Incident (DateQuePaso): ${dateHappened}`);
-            doc.moveDown();
-            
-            doc.fontSize(16).text('CERTIFICATION', { underline: true });
-            doc.fontSize(12);
-            doc.text(`Asked for Payment: [${askedPayment ? 'X' : ' '}] Yes  [${!askedPayment ? 'X' : ' '}] No`);
-            doc.text(`Filed more than 12 claims in last 12 months: [${filed12Claims ? 'X' : ' '}] Yes_2  [${!filed12Claims ? 'X' : ' '}] No_2`);
-            doc.text(`Claim is for more than $2,500: [${over2500 ? 'X' : ' '}] Yes_3  [${!over2500 ? 'X' : ' '}] No_3`);
-            doc.moveDown();
-            
-            doc.fontSize(16).text('SIGNATURE', { underline: true });
-            doc.fontSize(12);
-            doc.text(`SignDate1: ${currentDate}`);
-            doc.text(`DateDos: ${plaintiffUsername}`);
-            doc.text(`pleasesignhereco: /s/ ${plaintiffUsername}`);
-            
-            doc.end();
+            await interaction.editReply({
+                embeds: [embed],
+                files: [attachment]
+            });
             
         } catch (error) {
             console.error('Error generating S100 form:', error);
