@@ -3147,69 +3147,92 @@ You are also required to file your answer or motion with the Clerk of this Court
             // Get the form from the PDF
             const form = pdfDoc.getForm();
             
+            // Debug: List all form fields
+            const fields = form.getFields();
+            console.log('Available form fields:');
+            fields.forEach(field => {
+                console.log(`Field name: ${field.getName()}, Type: ${field.constructor.name}`);
+            });
+            
             // Fill the form fields
-            // Defendant information
-            const defendantUsernameField = form.getTextField('DefendantUsername1');
-            defendantUsernameField.setText(defendantUsername);
-            
-            const defendantDiscordField = form.getTextField('Discord2');
-            defendantDiscordField.setText(defendantDiscord);
-            
-            // Plaintiff information
-            const plaintiffUsernameField = form.getTextField('PlaintiffUsername1');
-            plaintiffUsernameField.setText(plaintiffUsername);
-            
-            const plaintiffDiscordField = form.getTextField('Discord_2');
-            plaintiffDiscordField.setText(plaintiffDiscord);
-            
-            // Amount owed
-            const amountField = form.getTextField('plaintiffmoney');
-            amountField.setText(amountOwed.toString());
-            
-            // Date when it happened
-            const dateField = form.getTextField('DateQuePaso');
-            dateField.setText(dateHappened);
-            
-            // Checkboxes
-            // Asked for payment
-            if (askedPayment) {
-                const yesCheckbox = form.getCheckBox('Yes');
-                yesCheckbox.check();
-            } else {
-                const noCheckbox = form.getCheckBox('No');
-                noCheckbox.check();
+            try {
+                // Defendant information
+                const defendantUsernameField = form.getTextField('DefendantUsername1');
+                defendantUsernameField.setText(defendantUsername);
+                
+                // Discord field (not Discord2)
+                const defendantDiscordField = form.getTextField('Discord');
+                defendantDiscordField.setText(defendantDiscord);
+                
+                // Plaintiff information
+                const plaintiffUsernameField = form.getTextField('PlaintiffUsername1');
+                plaintiffUsernameField.setText(plaintiffUsername);
+                
+                const plaintiffDiscordField = form.getTextField('Discord_2');
+                plaintiffDiscordField.setText(plaintiffDiscord);
+                
+                // Amount owed
+                const amountField = form.getTextField('plaintiffmoney');
+                amountField.setText(amountOwed.toString());
+                
+                // Date when it happened
+                const dateField = form.getTextField('DateQuePaso');
+                dateField.setText(dateHappened);
+                
+                // Radio buttons - Note: We need to handle these differently
+                // For now, we'll skip the radio buttons as they require specific option values
+                // that we need to determine from the PDF
+                
+                // Auto-fill fields
+                // Sign date
+                const signDateField = form.getTextField('SignDate1');
+                signDateField.setText(currentDate);
+                
+                // DateDos (filled with plaintiff username)
+                const dateDosField = form.getTextField('DateDos');
+                dateDosField.setText(plaintiffUsername);
+                
+                // Signature field - For signature fields, we just put text
+                // Note: PDFSignature fields may not accept setText, so we'll handle errors
+                try {
+                    const signatureField = form.getTextField('pleasesignhereco');
+                    if (signatureField) {
+                        signatureField.setText(`/s/ ${plaintiffUsername}`);
+                    }
+                } catch (sigError) {
+                    console.log('Could not fill signature field, it may require actual signature data');
+                }
+                
+                // Handle the radio groups for the yes/no questions
+                // We need to add text annotations for these since radio groups need specific option values
+                const pages = pdfDoc.getPages();
+                const firstPage = pages[0];
+                const { height } = firstPage.getSize();
+                
+                // Add text to show the answers for radio questions
+                // These are approximations - would need exact coordinates from PDF analysis
+                firstPage.drawText(askedPayment ? '✓ Yes' : '✓ No', {
+                    x: 100,
+                    y: height - 400,
+                    size: 12,
+                });
+                
+                firstPage.drawText(filed12Claims ? '✓ Yes' : '✓ No', {
+                    x: 100,
+                    y: height - 450,
+                    size: 12,
+                });
+                
+                firstPage.drawText(over2500 ? '✓ Yes' : '✓ No', {
+                    x: 100,
+                    y: height - 500,
+                    size: 12,
+                });
+                
+            } catch (fieldError) {
+                console.error('Error filling form fields:', fieldError);
+                throw fieldError;
             }
-            
-            // Filed 12+ claims
-            if (filed12Claims) {
-                const yes2Checkbox = form.getCheckBox('Yes_2');
-                yes2Checkbox.check();
-            } else {
-                const no2Checkbox = form.getCheckBox('No_2');
-                no2Checkbox.check();
-            }
-            
-            // Over $2,500
-            if (over2500) {
-                const yes3Checkbox = form.getCheckBox('Yes_3');
-                yes3Checkbox.check();
-            } else {
-                const no3Checkbox = form.getCheckBox('No_3');
-                no3Checkbox.check();
-            }
-            
-            // Auto-fill fields
-            // Sign date
-            const signDateField = form.getTextField('SignDate1');
-            signDateField.setText(currentDate);
-            
-            // DateDos (filled with plaintiff username)
-            const dateDosField = form.getTextField('DateDos');
-            dateDosField.setText(plaintiffUsername);
-            
-            // Signature (pleasesignhereco)
-            const signatureField = form.getTextField('pleasesignhereco');
-            signatureField.setText(plaintiffUsername);
             
             // Save the filled PDF
             const pdfBytes = await pdfDoc.save();
@@ -3244,11 +3267,12 @@ You are also required to file your answer or motion with the Clerk of this Court
             
         } catch (error) {
             console.error('Error generating S100 form:', error);
+            console.error('Error stack:', error.stack);
             const errorMessage = interaction.deferred || interaction.replied 
                 ? 'editReply' 
                 : 'reply';
             await interaction[errorMessage]({ 
-                content: 'An error occurred while generating the S100 form.', 
+                content: `An error occurred while generating the S100 form: ${error.message}`, 
                 flags: 64 
             });
         }

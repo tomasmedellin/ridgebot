@@ -15,7 +15,8 @@
       "Bash(npm run:*)",
       "Bash(node:*)",
       "Bash(find:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }
