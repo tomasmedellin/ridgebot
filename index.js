@@ -434,43 +434,7 @@ client.once(Events.ClientReady, async readyClient => {
     
     const s100Command = new SlashCommandBuilder()
         .setName('s100')
-        .setDescription('Generate a Small Claims form (S100)')
-        .addStringOption(option =>
-            option.setName('defendant_username')
-                .setDescription('Who are you suing?')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('defendant_discord')
-                .setDescription('What is their Discord?')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('plaintiff_username')
-                .setDescription('What is your Username?')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('plaintiff_discord')
-                .setDescription('What is your Discord?')
-                .setRequired(true))
-        .addNumberOption(option =>
-            option.setName('amount_owed')
-                .setDescription('How much money do you claim the Defendant owes you?')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('date_happened')
-                .setDescription('When did this happen? (MM/DD/YYYY)')
-                .setRequired(true))
-        .addBooleanOption(option =>
-            option.setName('asked_payment')
-                .setDescription('Have you asked the defendant to pay you?')
-                .setRequired(true))
-        .addBooleanOption(option =>
-            option.setName('filed_12_claims')
-                .setDescription('Have you filed more than 12 other small claims within the last 12 months in Ridgeway?')
-                .setRequired(true))
-        .addBooleanOption(option =>
-            option.setName('over_2500')
-                .setDescription('Is your claim for more than $2,500?')
-                .setRequired(true));
+        .setDescription('Get the Small Claims form (S100) and filing instructions');
     
     try {
         await readyClient.application.commands.set([
@@ -3124,155 +3088,68 @@ You are also required to file your answer or motion with the Clerk of this Court
     
     if (interaction.commandName === 's100') {
         try {
-            await interaction.deferReply();
-            
-            // Get all the form data from the command options
-            const defendantUsername = interaction.options.getString('defendant_username');
-            const defendantDiscord = interaction.options.getString('defendant_discord');
-            const plaintiffUsername = interaction.options.getString('plaintiff_username');
-            const plaintiffDiscord = interaction.options.getString('plaintiff_discord');
-            const amountOwed = interaction.options.getNumber('amount_owed');
-            const dateHappened = interaction.options.getString('date_happened');
-            const askedPayment = interaction.options.getBoolean('asked_payment');
-            const filed12Claims = interaction.options.getBoolean('filed_12_claims');
-            const over2500 = interaction.options.getBoolean('over_2500');
-            
-            // Generate current date for form
-            const currentDate = new Date().toLocaleDateString('en-US');
-            
-            // Load the existing S100 PDF
-            const existingPdfBytes = await fs.readFile('./RW S100.pdf');
-            const pdfDoc = await PDFLib.load(existingPdfBytes);
-            
-            // Get the form from the PDF
-            const form = pdfDoc.getForm();
-            
-            // Debug: List all form fields
-            const fields = form.getFields();
-            console.log('Available form fields:');
-            fields.forEach(field => {
-                console.log(`Field name: ${field.getName()}, Type: ${field.constructor.name}`);
-            });
-            
-            // Fill the form fields
-            try {
-                // Defendant information
-                const defendantUsernameField = form.getTextField('DefendantUsername1');
-                defendantUsernameField.setText(defendantUsername);
-                
-                // Discord field (not Discord2)
-                const defendantDiscordField = form.getTextField('Discord');
-                defendantDiscordField.setText(defendantDiscord);
-                
-                // Plaintiff information
-                const plaintiffUsernameField = form.getTextField('PlaintiffUsername1');
-                plaintiffUsernameField.setText(plaintiffUsername);
-                
-                const plaintiffDiscordField = form.getTextField('Discord_2');
-                plaintiffDiscordField.setText(plaintiffDiscord);
-                
-                // Amount owed
-                const amountField = form.getTextField('plaintiffmoney');
-                amountField.setText(amountOwed.toString());
-                
-                // Date when it happened
-                const dateField = form.getTextField('DateQuePaso');
-                dateField.setText(dateHappened);
-                
-                // Radio buttons - Note: We need to handle these differently
-                // For now, we'll skip the radio buttons as they require specific option values
-                // that we need to determine from the PDF
-                
-                // Auto-fill fields
-                // Sign date
-                const signDateField = form.getTextField('SignDate1');
-                signDateField.setText(currentDate);
-                
-                // DateDos (filled with plaintiff username)
-                const dateDosField = form.getTextField('DateDos');
-                dateDosField.setText(plaintiffUsername);
-                
-                // Signature field - For signature fields, we just put text
-                // Note: PDFSignature fields may not accept setText, so we'll handle errors
-                try {
-                    const signatureField = form.getTextField('pleasesignhereco');
-                    if (signatureField) {
-                        signatureField.setText(`/s/ ${plaintiffUsername}`);
-                    }
-                } catch (sigError) {
-                    console.log('Could not fill signature field, it may require actual signature data');
-                }
-                
-                // Handle the radio groups for the yes/no questions
-                // We need to add text annotations for these since radio groups need specific option values
-                const pages = pdfDoc.getPages();
-                const firstPage = pages[0];
-                const { height } = firstPage.getSize();
-                
-                // Add text to show the answers for radio questions
-                // These are approximations - would need exact coordinates from PDF analysis
-                firstPage.drawText(askedPayment ? 'X Yes' : 'X No', {
-                    x: 100,
-                    y: height - 400,
-                    size: 12,
-                });
-                
-                firstPage.drawText(filed12Claims ? 'X Yes' : 'X No', {
-                    x: 100,
-                    y: height - 450,
-                    size: 12,
-                });
-                
-                firstPage.drawText(over2500 ? 'X Yes' : 'X No', {
-                    x: 100,
-                    y: height - 500,
-                    size: 12,
-                });
-                
-            } catch (fieldError) {
-                console.error('Error filling form fields:', fieldError);
-                throw fieldError;
-            }
-            
-            // Save the filled PDF
-            const pdfBytes = await pdfDoc.save();
+            // Load the empty S100 PDF
+            const pdfBytes = await fs.readFile('./RW S100.pdf');
             
             // Create attachment
-            const attachment = new AttachmentBuilder(Buffer.from(pdfBytes), { 
-                name: `S100-${plaintiffUsername}-vs-${defendantUsername}-${Date.now()}.pdf` 
+            const attachment = new AttachmentBuilder(pdfBytes, { 
+                name: 'S100-Small-Claims-Form.pdf' 
             });
             
-            // Create embed with form summary
+            // Create embed with instructions
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
                 .setTitle('📋 Small Claims Form S100')
-                .setDescription('Your Small Claims form has been filled and generated.')
+                .setDescription('**How to file a Small Claims Court Case:**')
                 .addFields(
-                    { name: 'Plaintiff', value: `${plaintiffUsername} (${plaintiffDiscord})`, inline: true },
-                    { name: 'Defendant', value: `${defendantUsername} (${defendantDiscord})`, inline: true },
-                    { name: 'Amount Claimed', value: `$${amountOwed.toFixed(2)}`, inline: true },
-                    { name: 'Date of Incident', value: dateHappened, inline: true },
-                    { name: 'Asked for Payment', value: askedPayment ? 'Yes' : 'No', inline: true },
-                    { name: 'Filed 12+ Claims', value: filed12Claims ? 'Yes' : 'No', inline: true },
-                    { name: 'Over $2,500', value: over2500 ? 'Yes' : 'No', inline: true },
-                    { name: 'Date Filed', value: currentDate, inline: true }
+                    { 
+                        name: 'Step 1', 
+                        value: 'Fill out this form completely', 
+                        inline: false 
+                    },
+                    { 
+                        name: 'Step 2', 
+                        value: 'Download the completed form', 
+                        inline: false 
+                    },
+                    { 
+                        name: 'Step 3', 
+                        value: 'Go to https://rwcourts.org/file-at-home', 
+                        inline: false 
+                    },
+                    { 
+                        name: 'Step 4', 
+                        value: 'Initialize a new case', 
+                        inline: false 
+                    },
+                    { 
+                        name: 'Step 5', 
+                        value: 'Select **Stationhouse Courtroom**', 
+                        inline: false 
+                    },
+                    { 
+                        name: 'Step 6', 
+                        value: 'Select **Small Claims** case type', 
+                        inline: false 
+                    },
+                    { 
+                        name: 'Step 7', 
+                        value: 'Fill out the rest of the fields and submit', 
+                        inline: false 
+                    }
                 )
                 .setTimestamp()
-                .setFooter({ text: 'Small Claims Court Form S100' });
+                .setFooter({ text: 'Small Claims Court Filing Instructions' });
             
-            await interaction.editReply({
+            await interaction.reply({
                 embeds: [embed],
                 files: [attachment]
             });
             
         } catch (error) {
-            console.error('Error generating S100 form:', error);
-            console.error('Error stack:', error.stack);
-            const errorMessage = interaction.deferred || interaction.replied 
-                ? 'editReply' 
-                : 'reply';
-            await interaction[errorMessage]({ 
-                content: `An error occurred while generating the S100 form: ${error.message}`, 
+            console.error('Error providing S100 form:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while retrieving the S100 form.', 
                 flags: 64 
             });
         }
