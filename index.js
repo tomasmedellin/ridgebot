@@ -3425,8 +3425,12 @@ You are also required to file your answer or motion with the Clerk of this Court
             const cases = await searchClosedCases(interaction.guildId, keyword);
             
             if (cases.length === 0) {
+                // Debug: Try searching ALL cases to see if it's a status issue
+                const allCasesQuery = await getCasesByJudge(interaction.guildId, ''); // This will get all cases
+                console.log(`Debug - Total cases in guild: ${allCasesQuery.length}`);
+                
                 await interaction.editReply({
-                    content: `No closed cases found containing the keyword: **${keyword}**`,
+                    content: `No closed cases found containing the keyword: **${keyword}**\n\n_Debug: Check console for case status information._`,
                     flags: 64
                 });
                 return;
