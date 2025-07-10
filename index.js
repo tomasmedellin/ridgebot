@@ -3694,25 +3694,23 @@ You are also required to file your answer or motion with the Clerk of this Court
             
             // Update channel permissions - add speak permissions for judge and parties
             const channel = interaction.channel;
-            const permissionOverwrites = [];
             
             // Add judge permissions
-            permissionOverwrites.push({
-                id: judge.id,
-                allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+            await channel.permissionOverwrites.edit(judge.id, {
+                ViewChannel: true,
+                SendMessages: true
             });
             
             // Add permissions for all parties
             for (const partyId of partyIds) {
-                permissionOverwrites.push({
-                    id: partyId,
-                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-                });
-            }
-            
-            // Apply permissions
-            for (const overwrite of permissionOverwrites) {
-                await channel.permissionOverwrites.edit(overwrite.id, overwrite);
+                try {
+                    await channel.permissionOverwrites.edit(partyId, {
+                        ViewChannel: true,
+                        SendMessages: true
+                    });
+                } catch (error) {
+                    console.error(`Error adding permissions for party ${partyId}:`, error);
+                }
             }
             
             // Create party display strings
