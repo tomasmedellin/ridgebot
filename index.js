@@ -3418,19 +3418,105 @@ You are also required to file your answer or motion with the Clerk of this Court
         
         await interaction.deferReply();
         
-        const keyword = interaction.options.getString('keyword');
+        const keyword = interaction.options.getString('keyword').toLowerCase();
+        const ARCHIVE_CATEGORY_ID = '1391054003252756642';
         
         try {
-            // Search for closed cases with the keyword
-            const cases = await searchClosedCases(interaction.guildId, keyword);
-            
-            if (cases.length === 0) {
-                // Debug: Try searching ALL cases to see if it's a status issue
-                const allCasesQuery = await getCasesByJudge(interaction.guildId, ''); // This will get all cases
-                console.log(`Debug - Total cases in guild: ${allCasesQuery.length}`);
-                
+            // Get the archive category
+            const archiveCategory = await interaction.guild.channels.fetch(ARCHIVE_CATEGORY_ID);
+            if (!archiveCategory || archiveCategory.type !== ChannelType.GuildCategory) {
                 await interaction.editReply({
-                    content: `No closed cases found containing the keyword: **${keyword}**\n\n_Debug: Check console for case status information._`,
+                    content: 'Archive category not found.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Get all channels in the archive category
+            const archivedChannels = archiveCategory.children.cache.filter(channel => 
+                channel.type === ChannelType.GuildText
+            );
+            
+            if (archivedChannels.size === 0) {
+                await interaction.editReply({
+                    content: 'No archived case channels found.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            const searchResults = [];
+            let channelsSearched = 0;
+            const maxResults = 10; // Limit results to prevent overwhelming response
+            
+            // Search through each archived channel
+            for (const [channelId, channel] of archivedChannels) {
+                if (searchResults.length >= maxResults) break;
+                
+                try {
+                    // Search messages in the channel
+                    let messages = await channel.messages.fetch({ limit: 100 });
+                    let oldestMessage = messages.last();
+                    
+                    // Keep fetching older messages until we've searched the whole channel
+                    while (oldestMessage && searchResults.length < maxResults) {
+                        // Search through the fetched messages
+                        for (const [msgId, message] of messages) {
+                            if (message.content.toLowerCase().includes(keyword) || 
+                                (message.embeds.length > 0 && 
+                                 message.embeds.some(embed => 
+                                    (embed.description && embed.description.toLowerCase().includes(keyword)) ||
+                                    (embed.title && embed.title.toLowerCase().includes(keyword)) ||
+                                    (embed.fields && embed.fields.some(field => 
+                                        field.value.toLowerCase().includes(keyword) || 
+                                        field.name.toLowerCase().includes(keyword)
+                                    ))
+                                 ))
+                            ) {
+                                // Get case info from the channel
+                                const caseData = await getCaseByChannel(interaction.guildId, channelId);
+                                
+                                if (!searchResults.find(r => r.channelId === channelId)) {
+                                    searchResults.push({
+                                        channelId: channelId,
+                                        channelName: channel.name,
+                                        caseCode: caseData ? caseData.case_code : channel.name,
+                                        matchedMessage: message.content.length > 100 
+                                            ? message.content.substring(0, 100) + '...' 
+                                            : message.content,
+                                        messageUrl: message.url,
+                                        caseData: caseData
+                                    });
+                                    break; // Only need one match per channel
+                                }
+                            }
+                        }
+                        
+                        // Fetch more messages if we haven't found a match yet
+                        if (!searchResults.find(r => r.channelId === channelId)) {
+                            try {
+                                messages = await channel.messages.fetch({ 
+                                    limit: 100, 
+                                    before: oldestMessage.id 
+                                });
+                                oldestMessage = messages.last();
+                            } catch (e) {
+                                break; // No more messages to fetch
+                            }
+                        } else {
+                            break; // Found a match, move to next channel
+                        }
+                    }
+                    
+                    channelsSearched++;
+                } catch (error) {
+                    console.error(`Error searching channel ${channel.name}:`, error);
+                }
+            }
+            
+            if (searchResults.length === 0) {
+                await interaction.editReply({
+                    content: `No closed cases found containing the keyword: **${keyword}**\n_Searched ${channelsSearched} archived channels._`,
                     flags: 64
                 });
                 return;
@@ -3440,70 +3526,55 @@ You are also required to file your answer or motion with the Clerk of this Court
             const searchEmbed = new EmbedBuilder()
                 .setColor(0x5865F2)
                 .setTitle(`🔍 CLOSED CASES SEARCH RESULTS`)
-                .setDescription(`Found ${cases.length} closed case(s) containing: **${keyword}**`)
+                .setDescription(`Found ${searchResults.length} closed case(s) containing: **${keyword}**`)
                 .setTimestamp()
-                .setFooter({ text: `Search performed by ${interaction.user.username}` });
+                .setFooter({ text: `Searched ${channelsSearched} archived channels` });
             
             // Add each case to the embed
-            for (const caseData of cases) {
-                // Parse plaintiff and defendant IDs
-                const plaintiffIds = caseData.plaintiff_ids.split(',').map(id => id.trim());
-                const defendantIds = caseData.defendant_ids ? caseData.defendant_ids.split(',').map(id => id.trim()) : [];
+            for (const result of searchResults) {
+                let caseTitle = result.caseCode;
                 
-                // Fetch user details for plaintiffs and defendants
-                const plaintiffs = [];
-                const defendants = [];
-                
-                for (const id of plaintiffIds) {
-                    try {
-                        const user = await client.users.fetch(id);
-                        plaintiffs.push(user.username);
-                    } catch (e) {
-                        plaintiffs.push(`User ${id}`);
+                // If we have case data, format a proper title
+                if (result.caseData) {
+                    const plaintiffIds = result.caseData.plaintiff_ids.split(',').map(id => id.trim());
+                    const defendantIds = result.caseData.defendant_ids ? result.caseData.defendant_ids.split(',').map(id => id.trim()) : [];
+                    
+                    // Fetch user details for plaintiffs and defendants
+                    const plaintiffs = [];
+                    const defendants = [];
+                    
+                    for (const id of plaintiffIds) {
+                        try {
+                            const user = await client.users.fetch(id);
+                            plaintiffs.push(user.username);
+                        } catch (e) {
+                            plaintiffs.push(`User ${id}`);
+                        }
+                    }
+                    
+                    for (const id of defendantIds) {
+                        try {
+                            const user = await client.users.fetch(id);
+                            defendants.push(user.username);
+                        } catch (e) {
+                            defendants.push(`User ${id}`);
+                        }
+                    }
+                    
+                    // Format case title
+                    if (defendants.length === 0) {
+                        caseTitle = `In Re: ${plaintiffs.join(', ')}`;
+                    } else {
+                        caseTitle = `${plaintiffs.join(', ')} v. ${defendants.join(', ')}`;
                     }
                 }
-                
-                for (const id of defendantIds) {
-                    try {
-                        const user = await client.users.fetch(id);
-                        defendants.push(user.username);
-                    } catch (e) {
-                        defendants.push(`User ${id}`);
-                    }
-                }
-                
-                // Format case title
-                let caseTitle;
-                if (defendants.length === 0) {
-                    caseTitle = `In Re: ${plaintiffs.join(', ')}`;
-                } else {
-                    caseTitle = `${plaintiffs.join(', ')} v. ${defendants.join(', ')}`;
-                }
-                
-                // Get judge name
-                let judgeName = 'Unknown Judge';
-                try {
-                    const judge = await client.users.fetch(caseData.judge_id);
-                    judgeName = judge.username;
-                } catch (e) {
-                    judgeName = `Judge ${caseData.judge_id}`;
-                }
-                
-                // Format closed date
-                const closedDate = new Date(caseData.created_at).toLocaleDateString();
                 
                 // Add field for this case
                 searchEmbed.addFields({
-                    name: `${caseData.case_code}`,
-                    value: `**${caseTitle}**\nJudge: ${judgeName}\nCase Link: ${caseData.case_link}\nFiled: ${closedDate}`,
+                    name: `${result.caseCode}`,
+                    value: `**${caseTitle}**\nChannel: <#${result.channelId}>\nMatch: "${result.matchedMessage}"\n[Jump to message](${result.messageUrl})`,
                     inline: false
                 });
-                
-                // Discord embed field limit is 25
-                if (searchEmbed.data.fields.length >= 25) {
-                    searchEmbed.setFooter({ text: `Showing first 25 cases of ${cases.length} total` });
-                    break;
-                }
             }
             
             await interaction.editReply({

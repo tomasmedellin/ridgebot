@@ -664,34 +664,6 @@ async function getAllFeesByUser(guildId, userId) {
 
 async function searchClosedCases(guildId, keyword) {
     const searchPattern = `%${keyword.toLowerCase()}%`;
-    
-    // Debug: First check if there are ANY closed cases
-    const debugQuery = `
-        SELECT COUNT(*) as count, status 
-        FROM cases 
-        WHERE guild_id = $1 
-        GROUP BY status
-    `;
-    const debugResult = await pool.query(debugQuery, [guildId]);
-    console.log('Debug - Cases by status:', debugResult.rows);
-    console.log('Debug - Searching for keyword:', keyword, 'Pattern:', searchPattern);
-    
-    // Also search without status filter to debug
-    const allMatchesQuery = `
-        SELECT case_code, status, case_link 
-        FROM cases 
-        WHERE guild_id = $1 
-        AND (
-            LOWER(case_code) LIKE $2 
-            OR LOWER(plaintiff_ids) LIKE $2
-            OR LOWER(defendant_ids) LIKE $2
-            OR LOWER(case_link) LIKE $2
-        )
-        LIMIT 5
-    `;
-    const allMatches = await pool.query(allMatchesQuery, [guildId, searchPattern]);
-    console.log('Debug - All matches (regardless of status):', allMatches.rows);
-    
     const query = `
         SELECT * FROM cases 
         WHERE guild_id = $1 
@@ -705,7 +677,6 @@ async function searchClosedCases(guildId, keyword) {
         ORDER BY created_at DESC
     `;
     const result = await pool.query(query, [guildId, searchPattern]);
-    console.log('Debug - Found closed cases:', result.rows.length);
     return result.rows;
 }
 
