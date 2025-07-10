@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder, Partials } = require('discord.js');
 const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
@@ -13,7 +13,8 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers
-    ]
+    ],
+    partials: [Partials.Message, Partials.Channel]
 });
 
 client.once(Events.ClientReady, async readyClient => {
@@ -112,6 +113,10 @@ client.once(Events.ClientReady, async readyClient => {
     const closeCommand = new SlashCommandBuilder()
         .setName('close')
         .setDescription('Close the case, generate transcript, and archive the channel');
+    
+    const fixCommand = new SlashCommandBuilder()
+        .setName('fix')
+        .setDescription('Reopen a closed case and move it back to active status');
     
     const finalRulingCommand = new SlashCommandBuilder()
         .setName('finalruling')
@@ -456,6 +461,7 @@ client.once(Events.ClientReady, async readyClient => {
             gagCommand.toJSON(),
             ungagCommand.toJSON(),
             closeCommand.toJSON(),
+            fixCommand.toJSON(),
             finalRulingCommand.toJSON(),
             appealNoticeCommand.toJSON(),
             certiorariCommand.toJSON(),
@@ -1094,6 +1100,119 @@ client.on(Events.InteractionCreate, async interaction => {
             console.error('Error closing case:', error);
             await interaction.editReply({ 
                 content: 'An error occurred while closing the case.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'fix') {
+        await interaction.deferReply();
+        
+        const channel = interaction.channel;
+        const ARCHIVE_CATEGORY_ID = '1391054003252756642';
+        
+        try {
+            // Check if channel is in archive category
+            if (channel.parentId !== ARCHIVE_CATEGORY_ID) {
+                await interaction.editReply({
+                    content: 'This command can only be used in archived case channels.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Move channel back to main category (no parent)
+            await channel.setParent(null, { lockPermissions: false });
+            
+            // Get all parties from the database
+            const caseData = await getCaseByChannelId(interaction.guildId, channel.id);
+            if (!caseData) {
+                await interaction.editReply({
+                    content: 'Case data not found in database.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Reset permissions to allow everyone to send messages
+            const permissionOverwrites = [
+                {
+                    id: interaction.guild.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AddReactions]
+                },
+                {
+                    id: interaction.client.user.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages]
+                }
+            ];
+            
+            // Add judge permissions
+            if (caseData.judge_id) {
+                permissionOverwrites.push({
+                    id: caseData.judge_id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages]
+                });
+            }
+            
+            // Add clerk permissions
+            if (caseData.clerk_id) {
+                permissionOverwrites.push({
+                    id: caseData.clerk_id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageMessages]
+                });
+            }
+            
+            // Add plaintiff permissions
+            if (caseData.plaintiff_ids) {
+                const plaintiffIds = caseData.plaintiff_ids.split(',').filter(id => id && !id.includes('#'));
+                for (const plaintiffId of plaintiffIds) {
+                    permissionOverwrites.push({
+                        id: plaintiffId,
+                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                    });
+                }
+            }
+            
+            // Add defendant permissions
+            if (caseData.defendant_ids) {
+                const defendantIds = caseData.defendant_ids.split(',').filter(id => id && !id.includes('#'));
+                for (const defendantId of defendantIds) {
+                    permissionOverwrites.push({
+                        id: defendantId,
+                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                    });
+                }
+            }
+            
+            // Apply all permission overwrites
+            await channel.permissionOverwrites.set(permissionOverwrites);
+            
+            // Update case status in database
+            await updateCaseStatus(interaction.guildId, channel.id, 'active');
+            
+            // Send reopening message
+            const reopenEmbed = new EmbedBuilder()
+                .setColor(0x00ff00)
+                .setTitle('⚖️ CASE REOPENED')
+                .setDescription('This case has been reopened and is now active.')
+                .addFields(
+                    { name: 'Status', value: 'Active', inline: true },
+                    { name: 'Reopened By', value: `${interaction.user}`, inline: true },
+                    { name: 'Reopened At', value: new Date().toLocaleString(), inline: true }
+                )
+                .setFooter({ text: 'This channel is now active and all parties can send messages.' })
+                .setTimestamp();
+            
+            await channel.send({ embeds: [reopenEmbed] });
+            
+            await interaction.editReply({
+                content: `Case ${channel.name} has been successfully reopened.`
+            });
+            
+        } catch (error) {
+            console.error('Error reopening case:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while reopening the case.', 
                 flags: 64 
             });
         }
@@ -4812,32 +4931,51 @@ async function checkHearingReminders() {
 
 // Message Delete Event Handler
 client.on(Events.MessageDelete, async message => {
-    // Ignore if the message wasn't cached (we don't have info about it)
-    if (!message.partial) {
-        try {
-            // Check if this channel has an active case
-            const caseInfo = await getCaseByChannel(message.channel.id);
-            
-            if (caseInfo && caseInfo.status === 'active') {
-                // Create the deletion notification embed
-                const deletionEmbed = new EmbedBuilder()
-                    .setColor(0xFFFF00) // Yellow color
-                    .setTitle('🔔 Record Modification Notice')
-                    .setDescription(`${message.author} has deleted message "${message.content || '[No content available]'}"`)
-                    .addFields(
-                        { name: 'Deleted By', value: message.author.toString(), inline: true },
-                        { name: 'Original Message Time', value: `<t:${Math.floor(message.createdTimestamp / 1000)}:F>`, inline: true },
-                        { name: 'Deletion Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
-                    )
-                    .setFooter({ text: 'Court transcript modification - unapproved' })
-                    .setTimestamp();
-                
-                // Send the notification to the same channel
-                await message.channel.send({ embeds: [deletionEmbed] });
+    try {
+        // If the message is partial, try to fetch it
+        if (message.partial) {
+            try {
+                await message.fetch();
+            } catch (error) {
+                console.log('Cannot fetch partial message:', error);
+                // Continue anyway - we might still have some info
             }
-        } catch (error) {
-            console.error('Error handling message deletion:', error);
         }
+        
+        // Check if this channel has an active case
+        const caseInfo = await getCaseByChannel(message.channel.id);
+        
+        if (caseInfo && caseInfo.status === 'active') {
+            // Extract whatever information we have
+            const messageContent = message.content || '[Message content not cached]';
+            const author = message.author ? message.author.toString() : '[Unknown user]';
+            const authorName = message.author ? message.author.username : 'Unknown';
+            
+            // Create the deletion notification embed
+            const deletionEmbed = new EmbedBuilder()
+                .setColor(0xFFFF00) // Yellow color
+                .setTitle('🔔 Record Modification Notice')
+                .setDescription(`${authorName} has deleted a message`)
+                .addFields(
+                    { name: 'Deleted Message', value: messageContent.substring(0, 1024), inline: false },
+                    { name: 'Author', value: author, inline: true }
+                );
+            
+            // Add timestamp fields if available
+            if (message.createdTimestamp) {
+                deletionEmbed.addFields({ name: 'Original Message Time', value: `<t:${Math.floor(message.createdTimestamp / 1000)}:F>`, inline: true });
+            }
+            
+            deletionEmbed.addFields({ name: 'Deletion Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true });
+            
+            deletionEmbed.setFooter({ text: 'Court transcript modification - unapproved' })
+                .setTimestamp();
+            
+            // Send the notification to the same channel
+            await message.channel.send({ embeds: [deletionEmbed] });
+        }
+    } catch (error) {
+        console.error('Error handling message deletion:', error);
     }
 });
 
