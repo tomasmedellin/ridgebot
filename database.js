@@ -285,7 +285,8 @@ async function initializeDatabase() {
                 party_ids TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 adjourned BOOLEAN DEFAULT FALSE,
-                adjourned_at TIMESTAMP
+                adjourned_at TIMESTAMP,
+                session_start_message_id VARCHAR(32)
             )
         `);
         
@@ -713,13 +714,13 @@ async function getNextDCCode(guildId) {
     return `DC-${nextNumber.toString().padStart(3, '0')}`;
 }
 
-async function createDutyCourt(guildId, dcCode, judgeId, partyIds) {
+async function createDutyCourt(guildId, dcCode, judgeId, partyIds, sessionStartMessageId = null) {
     const query = `
-        INSERT INTO duty_court_sessions (guild_id, dc_code, judge_id, party_ids)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO duty_court_sessions (guild_id, dc_code, judge_id, party_ids, session_start_message_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
     `;
-    const values = [guildId, dcCode, judgeId, partyIds];
+    const values = [guildId, dcCode, judgeId, partyIds, sessionStartMessageId];
     const result = await pool.query(query, values);
     return result.rows[0];
 }
@@ -743,6 +744,15 @@ async function adjournDutyCourt(guildId, dcCode) {
         WHERE guild_id = $1 AND dc_code = $2 AND adjourned = FALSE
     `;
     await pool.query(query, [guildId, dcCode]);
+}
+
+async function updateDutyCourtSessionStart(guildId, dcCode, messageId) {
+    const query = `
+        UPDATE duty_court_sessions 
+        SET session_start_message_id = $3
+        WHERE guild_id = $1 AND dc_code = $2 AND adjourned = FALSE
+    `;
+    await pool.query(query, [guildId, dcCode, messageId]);
 }
 
 module.exports = {
@@ -786,5 +796,6 @@ module.exports = {
     getNextDCCode,
     createDutyCourt,
     getActiveDutyCourt,
-    adjournDutyCourt
+    adjournDutyCourt,
+    updateDutyCourtSessionStart
 };

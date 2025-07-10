@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder, Partials } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases, getNextDCCode, createDutyCourt, getActiveDutyCourt, adjournDutyCourt } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases, getNextDCCode, createDutyCourt, getActiveDutyCourt, adjournDutyCourt, updateDutyCourtSessionStart } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
@@ -3733,7 +3733,10 @@ You are also required to file your answer or motion with the Clerk of this Court
                 .setTimestamp()
                 .setFooter({ text: 'Court is now in session' });
             
-            await interaction.editReply({ embeds: [sessionEmbed] });
+            const sessionMessage = await interaction.editReply({ embeds: [sessionEmbed], fetchReply: true });
+            
+            // Update the session with the start message ID
+            await updateDutyCourtSessionStart(interaction.guildId, dcCode, sessionMessage.id);
             
         } catch (error) {
             console.error('Error initializing duty court session:', error);
@@ -3772,24 +3775,56 @@ You are also required to file your answer or motion with the Clerk of this Court
             // Parse party IDs from database
             const partyIds = activeDC.party_ids.split(',').filter(id => id && !id.includes('#') && /^\d+$/.test(id));
             
-            // Remove send permissions for all parties (keep view permissions)
             const channel = interaction.channel;
             
-            // Remove permissions for judge
-            await channel.permissionOverwrites.edit(activeDC.judge_id, {
-                ViewChannel: true,
-                SendMessages: false
-            });
+            // Fetch messages from the session start to now
+            let allMessages = [];
+            let lastMessageId = null;
+            let foundStartMessage = false;
+            
+            // Fetch messages in batches until we find the session start message
+            while (!foundStartMessage) {
+                const options = { limit: 100 };
+                if (lastMessageId) {
+                    options.before = lastMessageId;
+                }
+                
+                const messages = await channel.messages.fetch(options);
+                
+                if (messages.size === 0) break;
+                
+                for (const [messageId, message] of messages) {
+                    if (messageId === activeDC.session_start_message_id) {
+                        foundStartMessage = true;
+                        allMessages.push(message);
+                        break;
+                    }
+                    allMessages.push(message);
+                }
+                
+                lastMessageId = messages.last().id;
+            }
+            
+            // Reverse to get chronological order
+            allMessages.reverse();
+            
+            // Generate HTML transcript
+            const transcriptHtml = generateDutyCourtTranscript(channel, allMessages, activeDC);
+            
+            // Create transcript file
+            const filename = `DC_${activeDC.dc_code}_Transcript_${new Date().toISOString().split('T')[0]}.html`;
+            const buffer = Buffer.from(transcriptHtml, 'utf-8');
+            const attachment = new AttachmentBuilder(buffer, { name: filename });
+            
+            // Remove ALL permissions for judge and parties
+            await channel.permissionOverwrites.delete(activeDC.judge_id);
             
             // Remove permissions for all parties
             for (const partyId of partyIds) {
                 try {
-                    await channel.permissionOverwrites.edit(partyId, {
-                        ViewChannel: true,
-                        SendMessages: false
-                    });
+                    await channel.permissionOverwrites.delete(partyId);
                 } catch (error) {
-                    console.error(`Error updating permissions for party ${partyId}:`, error);
+                    console.error(`Error removing permissions for party ${partyId}:`, error);
                 }
             }
             
@@ -3804,12 +3839,16 @@ You are also required to file your answer or motion with the Clerk of this Court
                 .addFields(
                     { name: 'Session Code', value: activeDC.dc_code, inline: true },
                     { name: 'Adjourned By', value: `<@${interaction.user.id}>`, inline: true },
-                    { name: 'Adjourned At', value: new Date().toLocaleString(), inline: true }
+                    { name: 'Adjourned At', value: new Date().toLocaleString(), inline: true },
+                    { name: 'Transcript', value: 'Court transcript attached below', inline: false }
                 )
                 .setTimestamp()
-                .setFooter({ text: 'Court is now adjourned - channel is view-only' });
+                .setFooter({ text: 'Court is now adjourned - all permissions removed' });
             
-            await interaction.editReply({ embeds: [adjournEmbed] });
+            await interaction.editReply({ 
+                embeds: [adjournEmbed],
+                files: [attachment]
+            });
             
         } catch (error) {
             console.error('Error adjourning duty court session:', error);
@@ -3869,6 +3908,311 @@ You are also required to file your answer or motion with the Clerk of this Court
         }
     }
 });
+
+function generateDutyCourtTranscript(channel, messages, sessionData) {
+    const escapeHtml = (text) => {
+        const map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        return text.replace(/[&<>"']/g, m => map[m]);
+    };
+    
+    const formatTimestamp = (timestamp) => {
+        return new Date(timestamp).toLocaleString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        });
+    };
+    
+    const formatMessage = (message) => {
+        let content = escapeHtml(message.content || '');
+        
+        // Convert Discord mentions to readable format
+        content = content.replace(/<@!?(\d+)>/g, (match, userId) => {
+            const user = message.mentions.users.get(userId);
+            return user ? `@${escapeHtml(user.username)}` : match;
+        });
+        
+        // Convert channel mentions
+        content = content.replace(/<#(\d+)>/g, (match, channelId) => {
+            const channel = message.mentions.channels.get(channelId);
+            return channel ? `#${escapeHtml(channel.name)}` : match;
+        });
+        
+        // Convert role mentions
+        content = content.replace(/<@&(\d+)>/g, (match, roleId) => {
+            const role = message.mentions.roles.get(roleId);
+            return role ? `@${escapeHtml(role.name)}` : match;
+        });
+        
+        // Convert newlines to <br>
+        content = content.replace(/\n/g, '<br>');
+        
+        return content;
+    };
+    
+    const messagesHtml = messages.map(message => {
+        const author = message.author;
+        const isBot = author.bot ? ' [BOT]' : '';
+        const attachments = message.attachments.size > 0 
+            ? `<div class="attachments">📎 ${message.attachments.size} attachment(s)</div>` 
+            : '';
+        const embeds = message.embeds.length > 0
+            ? message.embeds.map(embed => {
+                let embedHtml = '<div class="embed">';
+                if (embed.title) embedHtml += `<div class="embed-title">${escapeHtml(embed.title)}</div>`;
+                if (embed.description) embedHtml += `<div class="embed-description">${escapeHtml(embed.description)}</div>`;
+                if (embed.fields && embed.fields.length > 0) {
+                    embedHtml += '<div class="embed-fields">';
+                    embed.fields.forEach(field => {
+                        embedHtml += `<div class="embed-field">`;
+                        embedHtml += `<div class="field-name">${escapeHtml(field.name)}</div>`;
+                        embedHtml += `<div class="field-value">${escapeHtml(field.value)}</div>`;
+                        embedHtml += '</div>';
+                    });
+                    embedHtml += '</div>';
+                }
+                embedHtml += '</div>';
+                return embedHtml;
+            }).join('')
+            : '';
+        
+        return `
+            <div class="message">
+                <div class="message-header">
+                    <span class="timestamp">[${formatTimestamp(message.createdTimestamp)}]</span>
+                    <span class="author">${escapeHtml(author.username)}${isBot}:</span>
+                </div>
+                <div class="message-content">${formatMessage(message)}</div>
+                ${attachments}
+                ${embeds}
+            </div>
+        `;
+    }).join('');
+    
+    const sessionStart = new Date(sessionData.created_at);
+    const sessionEnd = new Date();
+    
+    return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Duty Court Transcript - ${sessionData.dc_code}</title>
+    <style>
+        @media print {
+            body {
+                background-color: white !important;
+                color: black !important;
+            }
+            .container {
+                box-shadow: none !important;
+            }
+        }
+        
+        body {
+            font-family: 'Times New Roman', Times, serif;
+            background-color: #f5f5f5;
+            color: #000;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 8.5in;
+            margin: 0 auto;
+            background-color: white;
+            padding: 1in;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            border-bottom: 2px solid #000;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            text-transform: uppercase;
+        }
+        .header h2 {
+            margin: 10px 0 0 0;
+            font-size: 18px;
+            font-weight: normal;
+        }
+        .case-info {
+            margin-bottom: 30px;
+        }
+        .case-info table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .case-info td {
+            padding: 5px 0;
+            vertical-align: top;
+        }
+        .case-info .label {
+            font-weight: bold;
+            width: 150px;
+        }
+        .transcript-header {
+            background-color: #f0f0f0;
+            padding: 10px;
+            margin: 20px 0;
+            border: 1px solid #ccc;
+            font-weight: bold;
+            text-align: center;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding-left: 20px;
+        }
+        .message-header {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .timestamp {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .author {
+            color: #000;
+            margin-left: 10px;
+        }
+        .message-content {
+            margin-left: 20px;
+            padding-left: 10px;
+            border-left: 2px solid #e0e0e0;
+        }
+        .attachments {
+            margin-top: 5px;
+            margin-left: 30px;
+            font-style: italic;
+            color: #666;
+        }
+        .embed {
+            margin: 10px 0 10px 30px;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border-left: 4px solid #0099ff;
+        }
+        .embed-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .embed-description {
+            margin-bottom: 10px;
+        }
+        .embed-fields {
+            margin-top: 10px;
+        }
+        .embed-field {
+            margin-bottom: 8px;
+        }
+        .field-name {
+            font-weight: bold;
+            color: #666;
+        }
+        .field-value {
+            margin-left: 10px;
+        }
+        .footer {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ccc;
+            text-align: center;
+            font-size: 0.9em;
+            color: #666;
+        }
+        .certification {
+            margin-top: 50px;
+            padding: 20px;
+            border: 1px solid #000;
+            background-color: #f9f9f9;
+        }
+        .certification h3 {
+            margin-top: 0;
+            text-align: center;
+        }
+        .signature-line {
+            margin-top: 40px;
+            border-bottom: 1px solid #000;
+            width: 300px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .signature-label {
+            text-align: center;
+            margin-top: 5px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>RIDGEWAY COUNTY DISTRICT COURT</h1>
+            <h2>OFFICIAL DUTY COURT TRANSCRIPT</h2>
+        </div>
+        
+        <div class="case-info">
+            <table>
+                <tr>
+                    <td class="label">Session Code:</td>
+                    <td>${sessionData.dc_code}</td>
+                </tr>
+                <tr>
+                    <td class="label">Session Start:</td>
+                    <td>${formatTimestamp(sessionStart)}</td>
+                </tr>
+                <tr>
+                    <td class="label">Session End:</td>
+                    <td>${formatTimestamp(sessionEnd)}</td>
+                </tr>
+                <tr>
+                    <td class="label">Total Messages:</td>
+                    <td>${messages.length}</td>
+                </tr>
+            </table>
+        </div>
+        
+        <div class="transcript-header">
+            VERBATIM TRANSCRIPT OF PROCEEDINGS
+        </div>
+        
+        <div class="messages">
+            ${messagesHtml}
+        </div>
+        
+        <div class="certification">
+            <h3>CERTIFICATE OF TRANSCRIPT</h3>
+            <p>I hereby certify that this transcript is a true and accurate record of the proceedings in Duty Court Session ${sessionData.dc_code} held in the Ridgeway County District Court.</p>
+            <p>This transcript was automatically generated from the official court record system.</p>
+            <div class="signature-line"></div>
+            <div class="signature-label">Court Recording System</div>
+        </div>
+        
+        <div class="footer">
+            <p>This is an official court document. Any unauthorized alteration is prohibited.</p>
+            <p>Generated on ${formatTimestamp(new Date())}</p>
+        </div>
+    </div>
+</body>
+</html>
+    `;
+}
 
 function generateTranscriptHTML(channel, messages) {
     const escapeHtml = (text) => {
