@@ -3809,10 +3809,34 @@ You are also required to file your answer or motion with the Clerk of this Court
             // Generate HTML transcript
             const transcriptHtml = generateDutyCourtTranscript(channel, allMessages, activeDC);
             
-            // Create transcript file
-            const filename = `DC_${activeDC.dc_code}_Transcript_${new Date().toISOString().split('T')[0]}.html`;
+            // Create transcript file with simplified name
+            const filename = `${activeDC.dc_code}_transcript.html`;
             const buffer = Buffer.from(transcriptHtml, 'utf-8');
             const attachment = new AttachmentBuilder(buffer, { name: filename });
+            
+            // Send transcript to the designated channel
+            const TRANSCRIPT_CHANNEL_ID = '1392761390892322896';
+            try {
+                const transcriptChannel = await interaction.guild.channels.fetch(TRANSCRIPT_CHANNEL_ID);
+                if (transcriptChannel) {
+                    const transcriptEmbed = new EmbedBuilder()
+                        .setColor(0x0099FF)
+                        .setTitle('📄 Duty Court Transcript')
+                        .setDescription(`Transcript for Duty Court Session **${activeDC.dc_code}**`)
+                        .addFields(
+                            { name: 'Session Date', value: new Date().toLocaleDateString(), inline: true },
+                            { name: 'Presiding Judge', value: `<@${activeDC.judge_id}>`, inline: true }
+                        )
+                        .setTimestamp();
+                    
+                    await transcriptChannel.send({
+                        embeds: [transcriptEmbed],
+                        files: [attachment]
+                    });
+                }
+            } catch (error) {
+                console.error('Error sending transcript to designated channel:', error);
+            }
             
             // Remove ALL permissions for judge and parties
             await channel.permissionOverwrites.delete(activeDC.judge_id);
@@ -3838,15 +3862,45 @@ You are also required to file your answer or motion with the Clerk of this Court
                     { name: 'Session Code', value: activeDC.dc_code, inline: true },
                     { name: 'Adjourned By', value: `<@${interaction.user.id}>`, inline: true },
                     { name: 'Adjourned At', value: new Date().toLocaleString(), inline: true },
-                    { name: 'Transcript', value: 'Court transcript attached below', inline: false }
+                    { name: 'Transcript', value: 'Transcript has been filed', inline: false }
                 )
                 .setTimestamp()
                 .setFooter({ text: 'Court is now adjourned - all permissions removed' });
             
             await interaction.editReply({ 
-                embeds: [adjournEmbed],
-                files: [attachment]
+                embeds: [adjournEmbed]
             });
+            
+            // Delete all messages in the duty court channel
+            try {
+                let messagesToDelete;
+                do {
+                    messagesToDelete = await channel.messages.fetch({ limit: 100 });
+                    
+                    // Filter out messages older than 14 days (Discord limitation)
+                    const deletableMessages = messagesToDelete.filter(msg => {
+                        const messageAge = Date.now() - msg.createdTimestamp;
+                        return messageAge < 14 * 24 * 60 * 60 * 1000; // 14 days in milliseconds
+                    });
+                    
+                    if (deletableMessages.size > 0) {
+                        if (deletableMessages.size === 1) {
+                            await deletableMessages.first().delete();
+                        } else {
+                            await channel.bulkDelete(deletableMessages);
+                        }
+                    }
+                    
+                    // If there are old messages we can't delete, break the loop
+                    if (messagesToDelete.size > deletableMessages.size) {
+                        break;
+                    }
+                    
+                } while (messagesToDelete.size === 100);
+                
+            } catch (error) {
+                console.error('Error deleting messages in duty court channel:', error);
+            }
             
         } catch (error) {
             console.error('Error adjourning duty court session:', error);
