@@ -361,6 +361,16 @@ async function getCaseByChannel(guildId, channelId) {
     return result.rows[0];
 }
 
+async function getCasesByJudge(guildId, judgeId) {
+    const query = `
+        SELECT * FROM cases 
+        WHERE guild_id = $1 AND judge_id = $2
+        ORDER BY created_at DESC
+    `;
+    const result = await pool.query(query, [guildId, judgeId]);
+    return result.rows;
+}
+
 async function createAppealDeadline(guildId, channelId, plaintiffId, defendantId, deadline) {
     const query = `
         INSERT INTO appeal_deadlines (guild_id, channel_id, plaintiff_id, defendant_id, deadline)
@@ -662,6 +672,7 @@ module.exports = {
     updateGagOrderStatus,
     updateCaseStatus,
     getCaseByChannel,
+    getCasesByJudge,
     createAppealDeadline,
     getExpiredAppealDeadlines,
     removePartyAccess,

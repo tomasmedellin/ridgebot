@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
@@ -436,6 +436,14 @@ client.once(Events.ClientReady, async readyClient => {
         .setName('filesmallclaim')
         .setDescription('Get the Small Claims form (S100) and filing instructions');
     
+    const docketCommand = new SlashCommandBuilder()
+        .setName('docket')
+        .setDescription('Generate a docket of cases for a selected judge')
+        .addUserOption(option =>
+            option.setName('judge')
+                .setDescription('Select a judge to view their case docket')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -467,7 +475,8 @@ client.once(Events.ClientReady, async readyClient => {
             executeFeeCommand.toJSON(),
             sudoFeeStatusCommand.toJSON(),
             feeSheetCommand.toJSON(),
-            fileSmallClaimCommand.toJSON()
+            fileSmallClaimCommand.toJSON(),
+            docketCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -3154,6 +3163,115 @@ You are also required to file your answer or motion with the Clerk of this Court
             });
         }
     }
+    
+    if (interaction.commandName === 'docket') {
+        // Check if user has the required role
+        const requiredRoleId = '1378583580988670022';
+        if (!interaction.member.roles.cache.has(requiredRoleId)) {
+            await interaction.reply({ 
+                content: 'You do not have permission to use this command.', 
+                flags: 64 
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        const selectedJudge = interaction.options.getUser('judge');
+        
+        try {
+            // Get all cases where the selected user is the judge
+            const cases = await getCasesByJudge(interaction.guildId, selectedJudge.id);
+            
+            if (cases.length === 0) {
+                await interaction.editReply({
+                    content: `No cases found where ${selectedJudge} is assigned as judge.`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Create the docket embed
+            const docketEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle(`⚖️ CASE DOCKET - Judge ${selectedJudge.username}`)
+                .setDescription(`Showing all cases assigned to ${selectedJudge}`)
+                .setTimestamp()
+                .setFooter({ text: `Total Cases: ${cases.length}` });
+            
+            // Add each case to the embed
+            for (const caseData of cases) {
+                // Parse plaintiff and defendant IDs
+                const plaintiffIds = caseData.plaintiff_ids.split(',').map(id => id.trim());
+                const defendantIds = caseData.defendant_ids ? caseData.defendant_ids.split(',').map(id => id.trim()) : [];
+                
+                // Fetch user details for plaintiffs and defendants
+                const plaintiffs = [];
+                const defendants = [];
+                
+                for (const id of plaintiffIds) {
+                    try {
+                        const user = await client.users.fetch(id);
+                        plaintiffs.push(user.username);
+                    } catch (e) {
+                        plaintiffs.push(`User ${id}`);
+                    }
+                }
+                
+                for (const id of defendantIds) {
+                    try {
+                        const user = await client.users.fetch(id);
+                        defendants.push(user.username);
+                    } catch (e) {
+                        defendants.push(`User ${id}`);
+                    }
+                }
+                
+                // Format case title
+                let caseTitle;
+                if (defendants.length === 0) {
+                    caseTitle = `In Re: ${plaintiffs.join(', ')}`;
+                } else {
+                    caseTitle = `${plaintiffs.join(', ')} v. ${defendants.join(', ')}`;
+                }
+                
+                // Get the channel
+                let channelMention = 'Channel not found';
+                try {
+                    const channel = await client.channels.fetch(caseData.channel_id);
+                    if (channel) {
+                        channelMention = `<#${channel.id}>`;
+                    }
+                } catch (e) {
+                    // Channel might be deleted
+                }
+                
+                // Add field for this case
+                docketEmbed.addFields({
+                    name: caseData.case_code,
+                    value: `**${caseTitle}**\nCase Channel: ${channelMention}\nStatus: ${caseData.status || 'active'}`,
+                    inline: false
+                });
+                
+                // Discord embed field limit is 25
+                if (docketEmbed.data.fields.length >= 25) {
+                    docketEmbed.setFooter({ text: `Showing first 25 cases of ${cases.length} total` });
+                    break;
+                }
+            }
+            
+            await interaction.editReply({
+                embeds: [docketEmbed]
+            });
+            
+        } catch (error) {
+            console.error('Error generating docket:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while generating the docket.', 
+                flags: 64 
+            });
+        }
+    }
 });
 
 function generateTranscriptHTML(channel, messages) {
@@ -4691,5 +4809,36 @@ async function checkHearingReminders() {
         console.error('Error checking hearing reminders:', error);
     }
 }
+
+// Message Delete Event Handler
+client.on(Events.MessageDelete, async message => {
+    // Ignore if the message wasn't cached (we don't have info about it)
+    if (!message.partial) {
+        try {
+            // Check if this channel has an active case
+            const caseInfo = await getCaseByChannel(message.channel.id);
+            
+            if (caseInfo && caseInfo.status === 'active') {
+                // Create the deletion notification embed
+                const deletionEmbed = new EmbedBuilder()
+                    .setColor(0xFFFF00) // Yellow color
+                    .setTitle('🔔 Record Modification Notice')
+                    .setDescription(`${message.author} has deleted message "${message.content || '[No content available]'}"`)
+                    .addFields(
+                        { name: 'Deleted By', value: message.author.toString(), inline: true },
+                        { name: 'Original Message Time', value: `<t:${Math.floor(message.createdTimestamp / 1000)}:F>`, inline: true },
+                        { name: 'Deletion Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
+                    )
+                    .setFooter({ text: 'Court transcript modification - unapproved' })
+                    .setTimestamp();
+                
+                // Send the notification to the same channel
+                await message.channel.send({ embeds: [deletionEmbed] });
+            }
+        } catch (error) {
+            console.error('Error handling message deletion:', error);
+        }
+    }
+});
 
 client.login(process.env.DISCORD_TOKEN);
