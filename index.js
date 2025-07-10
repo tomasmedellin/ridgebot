@@ -7,6 +7,10 @@ const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
 const axios = require('axios');
 const moment = require('moment-timezone');
 
+// Message cache for active case channels
+const messageCache = new Map(); // channelId -> Map(messageId -> messageData)
+const MAX_MESSAGES_PER_CHANNEL = 1000; // Limit cache size per channel
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -4929,27 +4933,95 @@ async function checkHearingReminders() {
     }
 }
 
-// Message Delete Event Handler
-client.on(Events.MessageDelete, async message => {
+// Message Create Event Handler - Cache messages in active case channels
+client.on(Events.MessageCreate, async message => {
     try {
-        // If the message is partial, try to fetch it
-        if (message.partial) {
-            try {
-                await message.fetch();
-            } catch (error) {
-                console.log('Cannot fetch partial message:', error);
-                // Continue anyway - we might still have some info
-            }
-        }
-        
         // Check if this channel has an active case
         const caseInfo = await getCaseByChannel(message.channel.id);
         
         if (caseInfo && caseInfo.status === 'active') {
-            // Extract whatever information we have
-            const messageContent = message.content || '[Message content not cached]';
-            const author = message.author ? message.author.toString() : '[Unknown user]';
-            const authorName = message.author ? message.author.username : 'Unknown';
+            // Initialize channel cache if it doesn't exist
+            if (!messageCache.has(message.channel.id)) {
+                messageCache.set(message.channel.id, new Map());
+            }
+            
+            const channelCache = messageCache.get(message.channel.id);
+            
+            // Store message data
+            channelCache.set(message.id, {
+                id: message.id,
+                content: message.content,
+                author: {
+                    id: message.author.id,
+                    username: message.author.username,
+                    tag: message.author.tag
+                },
+                createdTimestamp: message.createdTimestamp,
+                attachments: message.attachments.map(att => ({
+                    name: att.name,
+                    url: att.url
+                })),
+                embeds: message.embeds.map(embed => ({
+                    title: embed.title,
+                    description: embed.description
+                }))
+            });
+            
+            // Limit cache size by removing oldest messages
+            if (channelCache.size > MAX_MESSAGES_PER_CHANNEL) {
+                const oldestKey = channelCache.keys().next().value;
+                channelCache.delete(oldestKey);
+            }
+        }
+    } catch (error) {
+        console.error('Error caching message:', error);
+    }
+});
+
+// Message Delete Event Handler
+client.on(Events.MessageDelete, async message => {
+    try {
+        // Check if this channel has an active case
+        const caseInfo = await getCaseByChannel(message.channel.id);
+        
+        if (caseInfo && caseInfo.status === 'active') {
+            let messageData = null;
+            
+            // First, try to get the message from our cache
+            const channelCache = messageCache.get(message.channel.id);
+            if (channelCache && channelCache.has(message.id)) {
+                messageData = channelCache.get(message.id);
+                // Remove from cache after retrieving
+                channelCache.delete(message.id);
+            }
+            
+            // If not in cache, try to use whatever Discord provides
+            if (!messageData && !message.partial) {
+                messageData = {
+                    content: message.content,
+                    author: {
+                        id: message.author?.id,
+                        username: message.author?.username,
+                        tag: message.author?.tag
+                    },
+                    createdTimestamp: message.createdTimestamp
+                };
+            }
+            
+            // Prepare display values
+            let messageContent = '[Message content not available]';
+            let authorDisplay = '[Unknown user]';
+            let authorName = 'Unknown';
+            let createdTimestamp = null;
+            
+            if (messageData) {
+                messageContent = messageData.content || '[Empty message]';
+                if (messageData.author) {
+                    authorDisplay = `<@${messageData.author.id}>`;
+                    authorName = messageData.author.username || 'Unknown';
+                }
+                createdTimestamp = messageData.createdTimestamp;
+            }
             
             // Create the deletion notification embed
             const deletionEmbed = new EmbedBuilder()
@@ -4958,15 +5030,21 @@ client.on(Events.MessageDelete, async message => {
                 .setDescription(`${authorName} has deleted a message`)
                 .addFields(
                     { name: 'Deleted Message', value: messageContent.substring(0, 1024), inline: false },
-                    { name: 'Author', value: author, inline: true }
+                    { name: 'Author', value: authorDisplay, inline: true }
                 );
             
             // Add timestamp fields if available
-            if (message.createdTimestamp) {
-                deletionEmbed.addFields({ name: 'Original Message Time', value: `<t:${Math.floor(message.createdTimestamp / 1000)}:F>`, inline: true });
+            if (createdTimestamp) {
+                deletionEmbed.addFields({ name: 'Original Message Time', value: `<t:${Math.floor(createdTimestamp / 1000)}:F>`, inline: true });
             }
             
             deletionEmbed.addFields({ name: 'Deletion Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true });
+            
+            // Add attachment info if available
+            if (messageData?.attachments && messageData.attachments.length > 0) {
+                const attachmentList = messageData.attachments.map(att => `• ${att.name}`).join('\n');
+                deletionEmbed.addFields({ name: 'Attachments', value: attachmentList.substring(0, 1024), inline: false });
+            }
             
             deletionEmbed.setFooter({ text: 'Court transcript modification - unapproved' })
                 .setTimestamp();
