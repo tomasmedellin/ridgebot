@@ -662,6 +662,24 @@ async function getAllFeesByUser(guildId, userId) {
     return result.rows;
 }
 
+async function searchClosedCases(guildId, keyword) {
+    const searchPattern = `%${keyword.toLowerCase()}%`;
+    const query = `
+        SELECT * FROM cases 
+        WHERE guild_id = $1 
+        AND status = 'closed'
+        AND (
+            LOWER(case_code) LIKE $2 
+            OR LOWER(plaintiff_ids) LIKE $2
+            OR LOWER(defendant_ids) LIKE $2
+            OR LOWER(case_link) LIKE $2
+        )
+        ORDER BY created_at DESC
+    `;
+    const result = await pool.query(query, [guildId, searchPattern]);
+    return result.rows;
+}
+
 module.exports = {
     initializeDatabase,
     createDiscoveryDeadline,
@@ -698,5 +716,6 @@ module.exports = {
     getFeesByUserAndCase,
     getFeeByInvoiceNumber,
     markFeePaid,
-    getAllFeesByUser
+    getAllFeesByUser,
+    searchClosedCases
 };

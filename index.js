@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder, Partials } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
@@ -453,6 +453,14 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('Select a judge to view their case docket')
                 .setRequired(true));
     
+    const allSearchCommand = new SlashCommandBuilder()
+        .setName('allsearch')
+        .setDescription('Search through closed cases for a keyword')
+        .addStringOption(option =>
+            option.setName('keyword')
+                .setDescription('The keyword to search for in closed cases')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -486,7 +494,8 @@ client.once(Events.ClientReady, async readyClient => {
             sudoFeeStatusCommand.toJSON(),
             feeSheetCommand.toJSON(),
             fileSmallClaimCommand.toJSON(),
-            docketCommand.toJSON()
+            docketCommand.toJSON(),
+            allSearchCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -3391,6 +3400,116 @@ You are also required to file your answer or motion with the Clerk of this Court
             console.error('Error generating docket:', error);
             await interaction.editReply({ 
                 content: 'An error occurred while generating the docket.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'allsearch') {
+        // Check if user has the required role
+        const requiredRoleId = '1392743464919236660';
+        if (!interaction.member.roles.cache.has(requiredRoleId)) {
+            await interaction.reply({ 
+                content: 'You do not have permission to use this command.', 
+                flags: 64 
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        const keyword = interaction.options.getString('keyword');
+        
+        try {
+            // Search for closed cases with the keyword
+            const cases = await searchClosedCases(interaction.guildId, keyword);
+            
+            if (cases.length === 0) {
+                await interaction.editReply({
+                    content: `No closed cases found containing the keyword: **${keyword}**`,
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Create the search results embed
+            const searchEmbed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle(`🔍 CLOSED CASES SEARCH RESULTS`)
+                .setDescription(`Found ${cases.length} closed case(s) containing: **${keyword}**`)
+                .setTimestamp()
+                .setFooter({ text: `Search performed by ${interaction.user.username}` });
+            
+            // Add each case to the embed
+            for (const caseData of cases) {
+                // Parse plaintiff and defendant IDs
+                const plaintiffIds = caseData.plaintiff_ids.split(',').map(id => id.trim());
+                const defendantIds = caseData.defendant_ids ? caseData.defendant_ids.split(',').map(id => id.trim()) : [];
+                
+                // Fetch user details for plaintiffs and defendants
+                const plaintiffs = [];
+                const defendants = [];
+                
+                for (const id of plaintiffIds) {
+                    try {
+                        const user = await client.users.fetch(id);
+                        plaintiffs.push(user.username);
+                    } catch (e) {
+                        plaintiffs.push(`User ${id}`);
+                    }
+                }
+                
+                for (const id of defendantIds) {
+                    try {
+                        const user = await client.users.fetch(id);
+                        defendants.push(user.username);
+                    } catch (e) {
+                        defendants.push(`User ${id}`);
+                    }
+                }
+                
+                // Format case title
+                let caseTitle;
+                if (defendants.length === 0) {
+                    caseTitle = `In Re: ${plaintiffs.join(', ')}`;
+                } else {
+                    caseTitle = `${plaintiffs.join(', ')} v. ${defendants.join(', ')}`;
+                }
+                
+                // Get judge name
+                let judgeName = 'Unknown Judge';
+                try {
+                    const judge = await client.users.fetch(caseData.judge_id);
+                    judgeName = judge.username;
+                } catch (e) {
+                    judgeName = `Judge ${caseData.judge_id}`;
+                }
+                
+                // Format closed date
+                const closedDate = new Date(caseData.created_at).toLocaleDateString();
+                
+                // Add field for this case
+                searchEmbed.addFields({
+                    name: `${caseData.case_code}`,
+                    value: `**${caseTitle}**\nJudge: ${judgeName}\nCase Link: ${caseData.case_link}\nFiled: ${closedDate}`,
+                    inline: false
+                });
+                
+                // Discord embed field limit is 25
+                if (searchEmbed.data.fields.length >= 25) {
+                    searchEmbed.setFooter({ text: `Showing first 25 cases of ${cases.length} total` });
+                    break;
+                }
+            }
+            
+            await interaction.editReply({
+                embeds: [searchEmbed]
+            });
+            
+        } catch (error) {
+            console.error('Error searching closed cases:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while searching closed cases.', 
                 flags: 64 
             });
         }
