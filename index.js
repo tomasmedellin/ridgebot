@@ -1125,7 +1125,7 @@ client.on(Events.InteractionCreate, async interaction => {
             await channel.setParent(null, { lockPermissions: false });
             
             // Get all parties from the database
-            const caseData = await getCaseByChannelId(interaction.guildId, channel.id);
+            const caseData = await getCaseByChannel(interaction.guildId, channel.id);
             if (!caseData) {
                 await interaction.editReply({
                     content: 'Case data not found in database.',
