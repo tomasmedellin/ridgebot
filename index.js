@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder, Partials } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases, getNextDCCode, createDutyCourt, getActiveDutyCourt, adjournDutyCourt } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
@@ -461,6 +461,30 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('The keyword to search for in closed cases')
                 .setRequired(true));
     
+    const dcSessionCommand = new SlashCommandBuilder()
+        .setName('dcsession')
+        .setDescription('Initialize a duty court session')
+        .addUserOption(option =>
+            option.setName('judge')
+                .setDescription('The presiding judge')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('parties')
+                .setDescription('Parties involved (space-separated @mentions or usernames)')
+                .setRequired(true));
+    
+    const dcAdjournCommand = new SlashCommandBuilder()
+        .setName('dcadjourn')
+        .setDescription('Adjourn the duty court session');
+    
+    const dcMinuteOrderCommand = new SlashCommandBuilder()
+        .setName('dcminuteorder')
+        .setDescription('Issue a minute order in duty court')
+        .addStringOption(option =>
+            option.setName('order')
+                .setDescription('The minute order text')
+                .setRequired(true));
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -495,7 +519,10 @@ client.once(Events.ClientReady, async readyClient => {
             feeSheetCommand.toJSON(),
             fileSmallClaimCommand.toJSON(),
             docketCommand.toJSON(),
-            allSearchCommand.toJSON()
+            allSearchCommand.toJSON(),
+            dcSessionCommand.toJSON(),
+            dcAdjournCommand.toJSON(),
+            dcMinuteOrderCommand.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -3585,6 +3612,258 @@ You are also required to file your answer or motion with the Clerk of this Court
             console.error('Error searching closed cases:', error);
             await interaction.editReply({ 
                 content: 'An error occurred while searching closed cases.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'dcsession') {
+        await interaction.deferReply();
+        
+        const DUTY_COURT_CHANNEL_ID = '1392752972899024896';
+        
+        if (interaction.channel.id !== DUTY_COURT_CHANNEL_ID) {
+            await interaction.editReply({
+                content: 'This command can only be used in the duty court channel.',
+                flags: 64
+            });
+            return;
+        }
+        
+        const judge = interaction.options.getUser('judge');
+        const partiesString = interaction.options.getString('parties');
+        
+        try {
+            // Helper function to parse both mentions and regular usernames
+            const parseUserInput = async (inputString) => {
+                if (!inputString) return { userIds: [], usernames: [] };
+                
+                const userIds = [];
+                const usernames = [];
+                const tokens = inputString.split(/\s+/);
+                
+                for (const token of tokens) {
+                    // Check if it's a mention
+                    const mentionMatch = token.match(/<@!?(\d+)>/);
+                    if (mentionMatch) {
+                        userIds.push(mentionMatch[1]);
+                    } else if (token.trim()) {
+                        // Treat as username - try to find user by username
+                        try {
+                            const members = await interaction.guild.members.fetch({ query: token, limit: 100 });
+                            const exactMatch = members.find(member => 
+                                member.user.username.toLowerCase() === token.toLowerCase() ||
+                                member.displayName.toLowerCase() === token.toLowerCase()
+                            );
+                            
+                            if (exactMatch) {
+                                userIds.push(exactMatch.id);
+                            } else {
+                                // If no Discord user found, store as plain username
+                                usernames.push(token);
+                            }
+                        } catch (error) {
+                            // If fetch fails, store as plain username
+                            usernames.push(token);
+                        }
+                    }
+                }
+                
+                return { userIds, usernames };
+            };
+            
+            // Parse parties
+            const partyResult = await parseUserInput(partiesString);
+            const partyIds = partyResult.userIds;
+            const partyUsernames = partyResult.usernames;
+            
+            if (partyIds.length === 0 && partyUsernames.length === 0) {
+                await interaction.editReply({
+                    content: 'Please provide at least one party (using @mention or username).',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Get next DC code
+            const dcCode = await getNextDCCode(interaction.guildId);
+            
+            // Store in database
+            const partiesForDb = [...partyIds, ...partyUsernames].join(',');
+            await createDutyCourt(interaction.guildId, dcCode, judge.id, partiesForDb);
+            
+            // Update channel permissions - add speak permissions for judge and parties
+            const channel = interaction.channel;
+            const permissionOverwrites = [];
+            
+            // Add judge permissions
+            permissionOverwrites.push({
+                id: judge.id,
+                allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+            });
+            
+            // Add permissions for all parties
+            for (const partyId of partyIds) {
+                permissionOverwrites.push({
+                    id: partyId,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+                });
+            }
+            
+            // Apply permissions
+            for (const overwrite of permissionOverwrites) {
+                await channel.permissionOverwrites.edit(overwrite.id, overwrite);
+            }
+            
+            // Create party display strings
+            const partyMentions = partyIds.map(id => `<@${id}>`);
+            const allParties = [...partyMentions, ...partyUsernames];
+            const partiesDisplay = allParties.join(', ');
+            
+            // Create session embed
+            const sessionEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('⚖️ DUTY COURT SESSION INITIALIZED')
+                .setDescription(`Duty Court session **${dcCode}** has been initialized.`)
+                .addFields(
+                    { name: 'Session Code', value: dcCode, inline: true },
+                    { name: 'Presiding Judge', value: `<@${judge.id}>`, inline: true },
+                    { name: 'Parties', value: partiesDisplay, inline: false }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Court is now in session' });
+            
+            await interaction.editReply({ embeds: [sessionEmbed] });
+            
+        } catch (error) {
+            console.error('Error initializing duty court session:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while initializing the duty court session.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'dcadjourn') {
+        await interaction.deferReply();
+        
+        const DUTY_COURT_CHANNEL_ID = '1392752972899024896';
+        
+        if (interaction.channel.id !== DUTY_COURT_CHANNEL_ID) {
+            await interaction.editReply({
+                content: 'This command can only be used in the duty court channel.',
+                flags: 64
+            });
+            return;
+        }
+        
+        try {
+            // Get active duty court session
+            const activeDC = await getActiveDutyCourt(interaction.guildId);
+            
+            if (!activeDC) {
+                await interaction.editReply({
+                    content: 'No active duty court session found.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Parse party IDs from database
+            const partyIds = activeDC.party_ids.split(',').filter(id => id && !id.includes('#') && /^\d+$/.test(id));
+            
+            // Remove send permissions for all parties (keep view permissions)
+            const channel = interaction.channel;
+            
+            // Remove permissions for judge
+            await channel.permissionOverwrites.edit(activeDC.judge_id, {
+                ViewChannel: true,
+                SendMessages: false
+            });
+            
+            // Remove permissions for all parties
+            for (const partyId of partyIds) {
+                try {
+                    await channel.permissionOverwrites.edit(partyId, {
+                        ViewChannel: true,
+                        SendMessages: false
+                    });
+                } catch (error) {
+                    console.error(`Error updating permissions for party ${partyId}:`, error);
+                }
+            }
+            
+            // Update database
+            await adjournDutyCourt(interaction.guildId, activeDC.dc_code);
+            
+            // Create adjourn embed
+            const adjournEmbed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('⚖️ DUTY COURT SESSION ADJOURNED')
+                .setDescription(`Duty Court session **${activeDC.dc_code}** has been adjourned.`)
+                .addFields(
+                    { name: 'Session Code', value: activeDC.dc_code, inline: true },
+                    { name: 'Adjourned By', value: `<@${interaction.user.id}>`, inline: true },
+                    { name: 'Adjourned At', value: new Date().toLocaleString(), inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Court is now adjourned - channel is view-only' });
+            
+            await interaction.editReply({ embeds: [adjournEmbed] });
+            
+        } catch (error) {
+            console.error('Error adjourning duty court session:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while adjourning the duty court session.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'dcminuteorder') {
+        const DUTY_COURT_CHANNEL_ID = '1392752972899024896';
+        
+        if (interaction.channel.id !== DUTY_COURT_CHANNEL_ID) {
+            await interaction.reply({
+                content: 'This command can only be used in the duty court channel.',
+                flags: 64
+            });
+            return;
+        }
+        
+        const orderText = interaction.options.getString('order');
+        
+        try {
+            // Get active duty court session
+            const activeDC = await getActiveDutyCourt(interaction.guildId);
+            
+            if (!activeDC) {
+                await interaction.reply({
+                    content: 'No active duty court session found.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Create minute order embed
+            const minuteOrderEmbed = new EmbedBuilder()
+                .setColor(0xFFD700)
+                .setTitle('📝 DUTY COURT MINUTE ORDER')
+                .setDescription(`**Session ${activeDC.dc_code}**`)
+                .addFields(
+                    { name: 'Order', value: orderText, inline: false },
+                    { name: 'Issued By', value: `<@${interaction.user.id}>`, inline: true },
+                    { name: 'Date/Time', value: new Date().toLocaleString(), inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: `Duty Court Session ${activeDC.dc_code}` });
+            
+            await interaction.reply({ embeds: [minuteOrderEmbed] });
+            
+        } catch (error) {
+            console.error('Error issuing duty court minute order:', error);
+            await interaction.reply({ 
+                content: 'An error occurred while issuing the minute order.', 
                 flags: 64 
             });
         }

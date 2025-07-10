@@ -276,6 +276,19 @@ async function initializeDatabase() {
             )
         `);
         
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS duty_court_sessions (
+                id SERIAL PRIMARY KEY,
+                guild_id VARCHAR(32) NOT NULL,
+                dc_code VARCHAR(10) NOT NULL,
+                judge_id VARCHAR(32) NOT NULL,
+                party_ids TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                adjourned BOOLEAN DEFAULT FALSE,
+                adjourned_at TIMESTAMP
+            )
+        `);
+        
         console.log('Database initialized successfully');
     } catch (error) {
         console.error('Error initializing database:', error);
@@ -680,6 +693,58 @@ async function searchClosedCases(guildId, keyword) {
     return result.rows;
 }
 
+async function getNextDCCode(guildId) {
+    const query = `
+        SELECT dc_code 
+        FROM duty_court_sessions 
+        WHERE guild_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT 1
+    `;
+    const result = await pool.query(query, [guildId]);
+    
+    if (result.rows.length === 0) {
+        return 'DC-010';
+    }
+    
+    const lastCode = result.rows[0].dc_code;
+    const codeNumber = parseInt(lastCode.split('-')[1]);
+    const nextNumber = codeNumber + 1;
+    return `DC-${nextNumber.toString().padStart(3, '0')}`;
+}
+
+async function createDutyCourt(guildId, dcCode, judgeId, partyIds) {
+    const query = `
+        INSERT INTO duty_court_sessions (guild_id, dc_code, judge_id, party_ids)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+    `;
+    const values = [guildId, dcCode, judgeId, partyIds];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+}
+
+async function getActiveDutyCourt(guildId) {
+    const query = `
+        SELECT * 
+        FROM duty_court_sessions 
+        WHERE guild_id = $1 AND adjourned = FALSE 
+        ORDER BY created_at DESC 
+        LIMIT 1
+    `;
+    const result = await pool.query(query, [guildId]);
+    return result.rows[0];
+}
+
+async function adjournDutyCourt(guildId, dcCode) {
+    const query = `
+        UPDATE duty_court_sessions 
+        SET adjourned = TRUE, adjourned_at = CURRENT_TIMESTAMP
+        WHERE guild_id = $1 AND dc_code = $2 AND adjourned = FALSE
+    `;
+    await pool.query(query, [guildId, dcCode]);
+}
+
 module.exports = {
     initializeDatabase,
     createDiscoveryDeadline,
@@ -717,5 +782,9 @@ module.exports = {
     getFeeByInvoiceNumber,
     markFeePaid,
     getAllFeesByUser,
-    searchClosedCases
+    searchClosedCases,
+    getNextDCCode,
+    createDutyCourt,
+    getActiveDutyCourt,
+    adjournDutyCourt
 };
