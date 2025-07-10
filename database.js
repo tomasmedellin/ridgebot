@@ -290,6 +290,18 @@ async function initializeDatabase() {
             )
         `);
         
+        // Add migration for session_start_message_id column
+        await pool.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='duty_court_sessions' AND column_name='session_start_message_id') 
+                THEN
+                    ALTER TABLE duty_court_sessions ADD COLUMN session_start_message_id VARCHAR(32);
+                END IF;
+            END $$;
+        `);
+        
         console.log('Database initialized successfully');
     } catch (error) {
         console.error('Error initializing database:', error);
