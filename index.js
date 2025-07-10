@@ -2140,7 +2140,7 @@ client.on(Events.InteractionCreate, async interaction => {
                     { name: 'Directed to', value: `${targetParty}`, inline: true },
                     { name: 'Issued By', value: `${interaction.user}`, inline: true },
                     { name: 'Case', value: caseInfo.case_code, inline: true },
-                    { name: 'Order', value: orderText, inline: false }
+                    { name: 'Order', value: orderText.length > 1024 ? orderText.substring(0, 1021) + '...' : orderText, inline: false }
                 )
                 .setTimestamp()
                 .setFooter({ text: 'This is an official court order' });
@@ -4031,6 +4031,8 @@ async function checkExpiredERPODeadlines() {
             } catch (channelError) {
                 // Channel doesn't exist or bot doesn't have access
                 console.error(`Failed to send ERPO deadline notification for order ${order.id} in channel ${order.channel_id}:`, channelError.message);
+                // Mark as notified anyway to prevent repeated attempts
+                await markERPODeadlineNotified(order.id);
                 // Continue processing other orders
             }
         }
