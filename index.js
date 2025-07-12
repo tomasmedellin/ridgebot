@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ChannelType, AttachmentBuilder, Partials } = require('discord.js');
-const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases, getNextDCCode, createDutyCourt, getActiveDutyCourt, adjournDutyCourt, updateDutyCourtSessionStart } = require('./database');
+const { initializeDatabase, createDiscoveryDeadline, getExpiredDeadlines, markAsNotified, createCase, createGagOrder, updateGagOrderStatus, updateCaseStatus, getCaseByChannel, getCasesByJudge, createAppealDeadline, getExpiredAppealDeadlines, removePartyAccess, fileAppealNotice, getActiveAppealDeadline, createAppealFiling, createFinancialDisclosure, createERPOOrder, getExpiredERPOOrders, markERPOSurrendered, getActiveERPOByUser, liftERPO, markERPODeadlineNotified, createFirearmsRelinquishment, createStaffInvoice, createDEJOrder, getDEJCheckinsDue, updateDEJCheckin, createHearing, getUpcomingHearingReminders, markHearingReminderSent, createFeeInvoice, getFeesByUserAndCase, getFeeByInvoiceNumber, markFeePaid, getAllFeesByUser, searchClosedCases, getNextDCCode, createDutyCourt, getActiveDutyCourt, adjournDutyCourt, updateDutyCourtSessionStart, reassignCase } = require('./database');
 const fs = require('fs').promises;
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, rgb } = require('pdf-lib');
@@ -121,6 +121,14 @@ client.once(Events.ClientReady, async readyClient => {
     const fixCommand = new SlashCommandBuilder()
         .setName('fix')
         .setDescription('Reopen a closed case and move it back to active status');
+    
+    const reassignCommand = new SlashCommandBuilder()
+        .setName('reassign')
+        .setDescription('Transfer a case from one judge to another')
+        .addUserOption(option =>
+            option.setName('new_judge')
+                .setDescription('The new judge to assign the case to')
+                .setRequired(true));
     
     const finalRulingCommand = new SlashCommandBuilder()
         .setName('finalruling')
@@ -498,6 +506,7 @@ client.once(Events.ClientReady, async readyClient => {
             ungagCommand.toJSON(),
             closeCommand.toJSON(),
             fixCommand.toJSON(),
+            reassignCommand.toJSON(),
             finalRulingCommand.toJSON(),
             appealNoticeCommand.toJSON(),
             certiorariCommand.toJSON(),
@@ -1258,6 +1267,71 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
     
+    if (interaction.commandName === 'reassign') {
+        await interaction.deferReply();
+        
+        const newJudge = interaction.options.getUser('new_judge');
+        const channel = interaction.channel;
+        
+        try {
+            // Get the case data
+            const caseData = await getCaseByChannel(interaction.guildId, channel.id);
+            if (!caseData) {
+                await interaction.editReply({
+                    content: 'This channel is not associated with a case.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Get the old judge info for the announcement
+            const oldJudge = await interaction.guild.members.fetch(caseData.judge_id).catch(() => null);
+            
+            // Update the judge in the database
+            await reassignCase(interaction.guildId, channel.id, newJudge.id);
+            
+            // Update channel permissions - remove old judge permissions
+            if (oldJudge) {
+                await channel.permissionOverwrites.delete(caseData.judge_id).catch(() => {});
+            }
+            
+            // Add new judge permissions
+            await channel.permissionOverwrites.create(newJudge.id, {
+                ViewChannel: true,
+                SendMessages: true,
+                ManageMessages: true
+            });
+            
+            // Create reassignment embed
+            const reassignEmbed = new EmbedBuilder()
+                .setColor(0x0099FF)
+                .setTitle('⚖️ CASE REASSIGNMENT')
+                .setDescription('This case has been transferred to a new judge.')
+                .addFields(
+                    { name: 'Previous Judge', value: oldJudge ? `${oldJudge}` : 'Unknown', inline: true },
+                    { name: 'New Judge', value: `${newJudge}`, inline: true },
+                    { name: 'Reassigned By', value: `${interaction.user}`, inline: true },
+                    { name: 'Case Code', value: caseData.case_code, inline: true },
+                    { name: 'Reassigned At', value: new Date().toLocaleString(), inline: false }
+                )
+                .setFooter({ text: 'All parties should direct future communications to the new judge.' })
+                .setTimestamp();
+            
+            await channel.send({ embeds: [reassignEmbed] });
+            
+            await interaction.editReply({
+                content: `Case ${caseData.case_code} has been successfully reassigned from ${oldJudge ? oldJudge.user.username : 'previous judge'} to ${newJudge.username}.`
+            });
+            
+        } catch (error) {
+            console.error('Error reassigning case:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while reassigning the case.', 
+                flags: 64 
+            });
+        }
+    }
+    
     if (interaction.commandName === 'finalruling') {
         const channel = interaction.channel;
         
@@ -1289,8 +1363,8 @@ client.on(Events.InteractionCreate, async interaction => {
                 await createAppealDeadline(
                     interaction.guildId,
                     channel.id,
-                    caseInfo.plaintiff_id,
-                    caseInfo.defendant_id,
+                    caseInfo.plaintiff_ids,
+                    caseInfo.defendant_ids,
                     deadline
                 );
             }
@@ -1346,9 +1420,12 @@ client.on(Events.InteractionCreate, async interaction => {
             
             // Determine party name (check if they're plaintiff, defendant, or other party)
             let partyType = 'Party';
-            if (userId === caseInfo.plaintiff_id) {
+            const plaintiffIds = caseInfo.plaintiff_ids ? caseInfo.plaintiff_ids.split(',').map(id => id.trim()) : [];
+            const defendantIds = caseInfo.defendant_ids ? caseInfo.defendant_ids.split(',').map(id => id.trim()) : [];
+            
+            if (plaintiffIds.includes(userId)) {
                 partyType = 'Plaintiff';
-            } else if (userId === caseInfo.defendant_id) {
+            } else if (defendantIds.includes(userId)) {
                 partyType = 'Defendant';
             }
             
@@ -2634,6 +2711,17 @@ client.on(Events.InteractionCreate, async interaction => {
             if (!caseInfo) {
                 await interaction.editReply({
                     content: 'The specified channel is not an active case channel.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Check if a final ruling has been issued (appeal deadline exists)
+            const appealDeadline = await getActiveAppealDeadline(interaction.guildId, caseChannel.id);
+            
+            if (appealDeadline) {
+                await interaction.editReply({
+                    content: 'A final ruling has been issued in this case. New Notices of Appearance cannot be filed after a final ruling. If you need to appeal, please use the /appealnotice command.',
                     flags: 64
                 });
                 return;
