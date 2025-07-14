@@ -4071,9 +4071,23 @@ You are also required to file your answer or motion with the Clerk of this Court
             
             // Check if user has the required role in the National Guard server
             const DEFCON1_ROLE_ID = '1394167441801875517';
-            const memberInNationalGuard = await nationalGuardGuild.members.fetch(interaction.user.id).catch(() => null);
+            let memberInNationalGuard;
             
-            if (!memberInNationalGuard || !memberInNationalGuard.roles.cache.has(DEFCON1_ROLE_ID)) {
+            try {
+                memberInNationalGuard = await nationalGuardGuild.members.fetch(interaction.user.id);
+                console.log(`User ${interaction.user.tag} found in National Guard server`);
+                console.log(`User roles:`, memberInNationalGuard.roles.cache.map(r => r.id));
+            } catch (error) {
+                console.log(`User ${interaction.user.tag} not found in National Guard server`);
+                await interaction.editReply({
+                    content: 'You must be a member of the National Guard server to use this command.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            if (!memberInNationalGuard.roles.cache.has(DEFCON1_ROLE_ID)) {
+                console.log(`User ${interaction.user.tag} does not have role ${DEFCON1_ROLE_ID}`);
                 await interaction.editReply({
                     content: 'You do not have permission to use this command. You must have the required role in the National Guard server.',
                     flags: 64
