@@ -493,6 +493,10 @@ client.once(Events.ClientReady, async readyClient => {
                 .setDescription('The minute order text')
                 .setRequired(true));
     
+    const defcon1Command = new SlashCommandBuilder()
+        .setName('defcon1')
+        .setDescription('Send emergency draft notices to all members of the National Guard server');
+    
     try {
         await readyClient.application.commands.set([
             discoveryCommand.toJSON(),
@@ -531,7 +535,8 @@ client.once(Events.ClientReady, async readyClient => {
             allSearchCommand.toJSON(),
             dcSessionCommand.toJSON(),
             dcAdjournCommand.toJSON(),
-            dcMinuteOrderCommand.toJSON()
+            dcMinuteOrderCommand.toJSON(),
+            defcon1Command.toJSON()
         ]);
         console.log('Successfully registered slash commands!');
     } catch (error) {
@@ -4043,6 +4048,90 @@ You are also required to file your answer or motion with the Clerk of this Court
             console.error('Error issuing duty court minute order:', error);
             await interaction.reply({ 
                 content: 'An error occurred while issuing the minute order.', 
+                flags: 64 
+            });
+        }
+    }
+    
+    if (interaction.commandName === 'defcon1') {
+        // Check if user has the required role
+        const DEFCON1_ROLE_ID = '1383245196732403883';
+        
+        if (!interaction.member.roles.cache.has(DEFCON1_ROLE_ID)) {
+            await interaction.reply({
+                content: 'You do not have permission to use this command.',
+                flags: 64
+            });
+            return;
+        }
+        
+        await interaction.deferReply();
+        
+        try {
+            // Target server ID for National Guard Discord
+            const NATIONAL_GUARD_SERVER_ID = '1392078909100654652';
+            const nationalGuardGuild = client.guilds.cache.get(NATIONAL_GUARD_SERVER_ID);
+            
+            if (!nationalGuardGuild) {
+                await interaction.editReply({
+                    content: 'Unable to find the National Guard server.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Create the draft notice embed
+            const draftNoticeEmbed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('⚠️ RIDGEWAY SELECTIVE SERVICE NOTICE')
+                .setDescription('You are hereby ordered for induction into the National Guard of the State of Ridgeway.\n\nYou must report to the Ridgeway National Guard Discord to determine your draft status and receive further instructions.\n\nFailure to report may result in action in accordance with the Ridgeway Selective Service Regulations.')
+                .addFields(
+                    { name: 'Report To', value: 'https://discord.com/invite/ByfKNtxK2R', inline: false }
+                )
+                .setFooter({ text: 'This message has been delivered via the Unified Court Systems Automation (UCSA), an authorized application for communication on behalf of the Ridgeway Selective Service System. This message is informational and not reflective of a formal court order.' })
+                .setTimestamp();
+            
+            // Fetch all members of the National Guard server
+            const members = await nationalGuardGuild.members.fetch();
+            let successCount = 0;
+            let failCount = 0;
+            
+            // Send DM to each member
+            for (const [memberId, member] of members) {
+                // Skip bots
+                if (member.user.bot) continue;
+                
+                try {
+                    await member.send({ embeds: [draftNoticeEmbed] });
+                    successCount++;
+                } catch (error) {
+                    failCount++;
+                    console.error(`Failed to DM user ${member.user.tag}:`, error.message);
+                }
+                
+                // Add a small delay to avoid rate limits
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            
+            // Send confirmation to the command issuer
+            await interaction.editReply({
+                content: `DEFCON1 activated. Draft notices sent to ${successCount} members. Failed to reach ${failCount} members.`,
+                embeds: [{
+                    color: 0x00FF00,
+                    title: '✅ DEFCON1 Execution Complete',
+                    fields: [
+                        { name: 'Successfully Notified', value: `${successCount} members`, inline: true },
+                        { name: 'Failed to Notify', value: `${failCount} members`, inline: true },
+                        { name: 'Total Members', value: `${successCount + failCount} members`, inline: true }
+                    ],
+                    timestamp: new Date()
+                }]
+            });
+            
+        } catch (error) {
+            console.error('Error executing DEFCON1:', error);
+            await interaction.editReply({ 
+                content: 'An error occurred while executing DEFCON1.', 
                 flags: 64 
             });
         }
