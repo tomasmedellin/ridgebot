@@ -4054,17 +4054,6 @@ You are also required to file your answer or motion with the Clerk of this Court
     }
     
     if (interaction.commandName === 'defcon1') {
-        // Check if user has the required role
-        const DEFCON1_ROLE_ID = '1394167441801875517';
-        
-        if (!interaction.member.roles.cache.has(DEFCON1_ROLE_ID)) {
-            await interaction.reply({
-                content: 'You do not have permission to use this command.',
-                flags: 64
-            });
-            return;
-        }
-        
         await interaction.deferReply();
         
         try {
@@ -4075,6 +4064,18 @@ You are also required to file your answer or motion with the Clerk of this Court
             if (!nationalGuardGuild) {
                 await interaction.editReply({
                     content: 'Unable to find the National Guard server.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Check if user has the required role in the National Guard server
+            const DEFCON1_ROLE_ID = '1394167441801875517';
+            const memberInNationalGuard = await nationalGuardGuild.members.fetch(interaction.user.id).catch(() => null);
+            
+            if (!memberInNationalGuard || !memberInNationalGuard.roles.cache.has(DEFCON1_ROLE_ID)) {
+                await interaction.editReply({
+                    content: 'You do not have permission to use this command. You must have the required role in the National Guard server.',
                     flags: 64
                 });
                 return;
