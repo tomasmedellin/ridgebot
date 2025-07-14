@@ -559,7 +559,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const casePartyCommands = ['appealnotice', 'certiorari', 'financialdisclosure', 'firearmsrelinquishment'];
     
     // Commands that have their own permission checks
-    const selfPermissionCommands = ['noa', 'staffinvoice'];
+    const selfPermissionCommands = ['noa', 'staffinvoice', 'defcon1'];
     
     if (casePartyCommands.includes(interaction.commandName)) {
         // If user has the allowed role, they can always use these commands
