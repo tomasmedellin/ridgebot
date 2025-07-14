@@ -4055,7 +4055,7 @@ You are also required to file your answer or motion with the Clerk of this Court
     
     if (interaction.commandName === 'defcon1') {
         // Check if user has the required role
-        const DEFCON1_ROLE_ID = '1383245196732403883';
+        const DEFCON1_ROLE_ID = '1394167441801875517';
         
         if (!interaction.member.roles.cache.has(DEFCON1_ROLE_ID)) {
             await interaction.reply({
