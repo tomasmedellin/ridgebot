@@ -4106,8 +4106,20 @@ You are also required to file your answer or motion with the Clerk of this Court
                 .setFooter({ text: 'This message has been delivered via the Unified Court Systems Automation (UCSA), an authorized application for communication on behalf of the Ridgeway Selective Service System. This message is informational and not reflective of a formal court order.' })
                 .setTimestamp();
             
-            // Fetch all members of the National Guard server
-            const members = await nationalGuardGuild.members.fetch();
+            // Target server to send messages to
+            const TARGET_SERVER_ID = '1348177368451121185';
+            const targetGuild = client.guilds.cache.get(TARGET_SERVER_ID);
+            
+            if (!targetGuild) {
+                await interaction.editReply({
+                    content: 'Unable to find the target server.',
+                    flags: 64
+                });
+                return;
+            }
+            
+            // Fetch all members of the target server
+            const members = await targetGuild.members.fetch();
             let successCount = 0;
             let failCount = 0;
             
